@@ -1,5 +1,4 @@
 import pandas as pd
-# comment
 
 def generate_report(df: pd.DataFrame):
     # Initialize an empty dictionary to hold the report
