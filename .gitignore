@@ -160,5 +160,10 @@ cython_debug/
 #.idea/
 
 
+# Ignore everything in the raw and dataset directories
 raw/*
 dataset/*
+
+# But don't ignore .md files in these directories
+!raw/*.md
+!dataset/*.md
