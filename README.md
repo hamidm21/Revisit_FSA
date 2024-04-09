@@ -3,4 +3,4 @@
 Here are the folders and what they contain:
 - raw: unprocessed data
 - dataset: processed data
-- notebook: self explanetory
+- notebook: source codes
