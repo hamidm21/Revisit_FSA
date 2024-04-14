@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "financial_nlp"
+version = "0.1.0"
+description = "financial nlp experiments"
+authors = ["Hamid Moradi <hordimad21@gmail.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pandas = "2.2.2"
+numpy = "1.26.4"
+transformers = "4.39.3"
+tqdm = "4.66.1"
+datasets = "2.18.0"
+scikit-learn = "1.4.2"
+torch = "2.2.0"
+accelerate = "^0.29.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
