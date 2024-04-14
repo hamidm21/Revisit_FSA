@@ -30,8 +30,8 @@ class DirectionSplitTBL(Experiment):
     def __init__(
         self,
         num_samples=100,
-        price_df_addr="../raw/daily-2020.csv",
-        text_df_addr="../raw/combined_tweets_2020_labeled.csv",
+        price_df_addr="raw/daily-2020.csv",
+        text_df_addr="raw/combined_tweets_2020_labeled.csv",
         logger=None
     ):
         super().__init__(
