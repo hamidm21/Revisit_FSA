@@ -1,0 +1,158 @@
+from logging import Logger
+class Experiment:
+    def __init__(self, id: int, description: str, logger: Logger=None, data_addr: str=None, model: any=None):
+        """
+        Initialize and validate the experiment.
+
+        Args:
+        id (int): The id of the experiment.
+        description (str): The description of the experiment.
+        data_addr (str): The address to the raw dataset to be used in the experiment.
+        model (any): The model to be used in the experiment.
+        """
+        self.id = id
+        self.description = description
+        self.logger = logger
+        self.data_addr = data_addr
+        self.model = model
+        self.start_time = None
+        self.end_time = None
+        self.results = None
+
+    def run(self):
+        """
+        Run the experiment.
+
+        This method should be overridden by subclasses to implement
+        the actual experiment logic.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def report(self):
+        """
+        Report the results of the experiment.
+
+        Returns:
+        dict: A dictionary containing the experiment results and metadata.
+        """
+        if self.start_time is None or self.end_time is None:
+            raise ValueError("Experiment has not been run.")
+        
+        duration = self.end_time - self.start_time
+        report = {
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "duration": duration,
+            "results": self.results,
+        }
+        return report
+
+    def __str__(self):
+        return self.description
+
+class Labeler:
+    def __init__(self, name):
+        """
+        Initialize the labeler.
+
+        Args:
+        name (str): The name of the labeler.
+        """
+        self.name = name
+
+    def fit(self, data):
+        """
+        Fit the labeler to the data.
+
+        This method should be overridden by subclasses to implement
+        the actual fitting logic.
+
+        Args:
+        data (any): The data to fit the labeler to.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def transform(self, data):
+        """
+        Transform the data into labels.
+
+        This method should be overridden by subclasses to implement
+        the actual transformation logic.
+
+        Args:
+        data (any): The data to transform into labels.
+
+        Returns:
+        any: The labels.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+class Model:
+    def __init__(self, name):
+        """
+        Initialize the model.
+
+        Args:
+        name (str): The name of the model.
+        """
+        self.name = name
+
+    def train(self, data, labels):
+        """
+        Train the model on the given data and labels.
+
+        This method should be overridden by subclasses to implement
+        the actual training logic.
+
+        Args:
+        data (any): The data to train the model on.
+        labels (any): The labels for the data.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def predict(self, data):
+        """
+        Use the model to make predictions on the given data.
+
+        This method should be overridden by subclasses to implement
+        the actual prediction logic.
+
+        Args:
+        data (any): The data to make predictions on.
+
+        Returns:
+        any: The predictions.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def evaluate(self, data, labels):
+        """
+        Evaluate the model on the given data and labels.
+
+        This method should be overridden by subclasses to implement
+        the actual evaluation logic.
+
+        Args:
+        data (any): The data to evaluate the model on.
+        labels (any): The labels for the data.
+
+        Returns:
+        any: The evaluation results.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
+
+    def compute_metrics(self, predictions, labels):
+        """
+        Compute metrics based on the model's predictions and the true labels.
+
+        This method should be overridden by subclasses to implement
+        the actual metrics computation logic.
+
+        Args:
+        predictions (any): The model's predictions.
+        labels (any): The true labels.
+
+        Returns:
+        any: The computed metrics.
+        """
+        raise NotImplementedError("Subclasses must implement this method.")
