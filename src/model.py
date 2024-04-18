@@ -129,6 +129,7 @@ class CryptoBERT(Model):
         return metrics
 
     def get_trainer(self, eval_dataset):
+        print(eval_dataset)
         def compute_metrics(pred):
             labels = pred.label_ids
             preds = pred.predictions.argmax(-1)
@@ -150,7 +151,9 @@ class CryptoBERT(Model):
             model=self.model,                 # the non-fine-tuned model
             args=trainer_args,                # training arguments, defined above
             eval_dataset=eval_dataset,        # test dataset
-            compute_metrics=compute_metrics   # the compute_metrics function
+            compute_metrics=compute_metrics,   # the compute_metrics function
+            callbacks=[]
         )
+
 
         return trainer

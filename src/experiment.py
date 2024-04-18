@@ -6,7 +6,6 @@ import pandas as pd
 from transformers import (
     AutoTokenizer,
     AutoModel,
-    TrainerCallback,
 )
 from tqdm import tqdm
 from sklearn.metrics import (
@@ -89,6 +88,7 @@ class DirectionSplitTBL(Experiment):
         labeled_texts = labeled_texts.select(range(self.num_samples))
 
         labeled_texts = labeled_texts.train_test_split(TRAIN_TEST_SPLIT)
+        print(labeled_texts)
 
         trainer = self.model.get_trainer(labeled_texts["test"])
 
@@ -101,7 +101,7 @@ class DirectionSplitTBL(Experiment):
             self.results["base"][key] = value
 
         self.logger.info(f"preparing data for finetuning the model...")
-        train_dataset = TextDataset(labeled_texts['test'])
+        train_dataset = TextDataset(labeled_texts['train'])
         test_dataset = TextDataset(labeled_texts['test'])
 
         train_dataloader = DataLoader(train_dataset, batch_size=TRAINING_BATCH_SIZE)
