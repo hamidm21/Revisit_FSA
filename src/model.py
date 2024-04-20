@@ -1,16 +1,34 @@
 from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments, AdamW
 from scipy.special import softmax
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import torch
 from tqdm import tqdm
 import numpy as np
-
+import matplotlib.pyplot as plt
 from type import Model
+import os
+from dotenv import load_dotenv
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Access the base address
+base_address = os.getenv("BASE_ADDRESS")
 
 class CryptoBERT(Model):
-    def __init__(self):
+    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'{base_address}/artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False):
         super().__init__("huggingface ElKulako/cryptobert")
-        self.model = AutoModelForSequenceClassification.from_pretrained("ElKulako/cryptobert", num_labels=3)
+        self.model_addr = model_addr
+        self.save_path = save_path
+        self.load_path = load_path
+        
+        if load_state_dict:
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, num_labels=3)
+            self.model.load_state_dict(torch.load(self.load_path))
+        else:
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, num_labels=3)
 
     def train(self, dataloader, device, learning_rate = 1e-5, epochs = 5):
         """
@@ -53,6 +71,9 @@ class CryptoBERT(Model):
             all_preds = np.concatenate(all_preds)
             all_probs = np.concatenate(all_probs)  # Concatenate probabilities
             results[epoch] = self.compute_metrics(all_labels, all_preds, all_probs)
+            
+            # Save the model after each epoch
+            torch.save(self.model.state_dict(), self.save_path)
 
         # metrics for each epoch
         return results
@@ -117,6 +138,9 @@ class CryptoBERT(Model):
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
+        
+        # Compute confusion matrix
+        conf_matrix = confusion_matrix(labels, preds)
 
         # Create a dictionary of metrics
         metrics = {
@@ -124,28 +148,42 @@ class CryptoBERT(Model):
             "f1": f1,
             "precision": precision,
             "recall": recall,
+            'confusion_matrix': conf_matrix
         }
 
         return metrics
 
+
     def get_trainer(self, eval_dataset):
-        print(eval_dataset)
-        def compute_metrics(pred):
+        
+        def compute_metrics(pred):    
             labels = pred.label_ids
             preds = pred.predictions.argmax(-1)
             probs = softmax(pred.predictions, axis=1)
             precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
             acc = accuracy_score(labels, preds)
             roc_auc = roc_auc_score(labels, probs, multi_class='ovr')
+
+            # Compute confusion matrix
+            conf_matrix = confusion_matrix(labels, preds)
+
+            # Plot confusion matrix
+            # disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Up', 'Neutral', 'Down'])
+            # disp.plot(cmap='Blues', values_format='d')
+            # plt.title('Confusion Matrix')
+            # plt.show()
+
             return {
                 'accuracy': acc,
                 'f1': f1,
                 'precision': precision,
                 'recall': recall,
-                'roc_auc': roc_auc
+                'roc_auc': roc_auc,
+                'confusion_matrix': conf_matrix
             }
+
         trainer_args = TrainingArguments(
-            output_dir="../artifact"
+            output_dir=self.save_path,
         )
         trainer = Trainer(
             model=self.model,                 # the non-fine-tuned model
@@ -154,6 +192,5 @@ class CryptoBERT(Model):
             compute_metrics=compute_metrics,   # the compute_metrics function
             callbacks=[]
         )
-
 
         return trainer
