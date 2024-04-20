@@ -169,3 +169,6 @@ dataset/*
 !dataset/*.md
 
 mlruns
+
+# Saved model checkpoints
+artifacts/*

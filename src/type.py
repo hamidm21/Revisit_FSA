@@ -1,6 +1,6 @@
 from logging import Logger
 class Experiment:
-    def __init__(self, id: int, description: str, logger: Logger=None, data_addr: str=None, model: any=None):
+    def __init__(self, id: int, description: str, base_addr: str, logger: Logger=None, data_addr: str=None, model: any=None):
         """
         Initialize and validate the experiment.
 
@@ -13,6 +13,7 @@ class Experiment:
         self.id = id
         self.description = description
         self.logger = logger
+        self.base_addr = base_addr
         self.data_addr = data_addr
         self.model = model
         self.start_time = None
