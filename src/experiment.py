@@ -76,7 +76,8 @@ class DirectionSplitTBL(Experiment):
         labeled_texts = HFDataset.from_pandas(labeled_texts[["text", "label"]])
         # shuffeling the dataset for a more unbiased mix
         labeled_texts = labeled_texts.shuffle(seed=SEED)
-        # TODO: preprocess the text column
+        # preprocess the text column
+        labeled_texts = HFDataset.preprocess(labeled_texts, labeled_texts)
 
         # tokenizing the dataset text to be used in train and test loops
         tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
