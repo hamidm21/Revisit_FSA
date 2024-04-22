@@ -43,20 +43,25 @@ class TripleBarrierLabeler(Labeler):
 
 
 class TrueRangeLabeler(Labeler):
-    def __init__(self):
+    def __init__(self, data):
         """
         Initialize the labeler.
         """
         super().__init__("true range labeler")
+        self.data = data.copy()
+        self.fit()
 
-    def fit(self, data):
+    def fit(self):
         """
         Fit the labeler to the data.
 
         Args:
         data (pd.DataFrame): The data to fit the labeler to.
         """
-        self.data = data.copy()
+        # Calculate the True Range
+        self.data['high_low'] = self.data['high'] - self.data['low']
+        self.data['high_prev_close'] = np.abs(self.data['high'] - self.data['close'].shift())
+        self.data['low_prev_close'] = np.abs(self.data['low'] - self.data['close'].shift())
 
     def transform(self):
         """
@@ -65,14 +70,10 @@ class TrueRangeLabeler(Labeler):
         Returns:
         pd.DataFrame: The labels.
         """
-        # Calculate the True Range
-        self.data['high_low'] = self.data['high'] - self.data['low']
-        self.data['high_prev_close'] = np.abs(self.data['high'] - self.data['close'].shift())
-        self.data['low_prev_close'] = np.abs(self.data['low'] - self.data['close'].shift())
         self.data['true_range'] = self.data[['high_low', 'high_prev_close', 'low_prev_close']].max(axis=1)
 
         # Normalize the True Range to be between 0 and 1
-        self.data['true_range_normalized'] = (self.data['true_range'] - self.data['true_range'].min()) / (self.data['true_range'].max() - self.data['true_range'].min())
+        self.data['label'] = (self.data['true_range'] - self.data['true_range'].min()) / (self.data['true_range'].max() - self.data['true_range'].min())
         
         return self.data
 
