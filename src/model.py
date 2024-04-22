@@ -1,8 +1,9 @@
-from transformers import AutoModelForSequenceClassification, Trainer, TrainingArguments, AdamW
+from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments, AdamW
 from scipy.special import softmax
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squared_error, mean_absolute_error
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,19 +19,28 @@ load_dotenv()
 base_address = os.getenv("BASE_ADDRESS")
 
 class CryptoBERT(Model):
-    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'{base_address}/artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False):
+    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'{base_address}/artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
         super().__init__("huggingface ElKulako/cryptobert")
         self.model_addr = model_addr
         self.save_path = save_path
         self.load_path = load_path
+        self.input_task = input_task
         
+        # Load configuration
+        config = AutoConfig.from_pretrained(model_addr)
+        
+        # Adjust configuration for regression task
+        if input_task == "regression":
+            config.num_labels = 1  # Adjust for regression task
+        
+        # Load model with modified configuration
         if load_state_dict:
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, num_labels=3)
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, config=config)
             self.model.load_state_dict(torch.load(self.load_path))
         else:
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, num_labels=3)
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, config=config, ignore_mismatched_sizes=True)
 
-    def train(self, dataloader, device, learning_rate = 1e-5, epochs = 5):
+    def train(self, dataloader, device, learning_rate=1e-5, epochs=5):
         """
         Train the model on the given data and labels.
 
@@ -52,28 +62,40 @@ class CryptoBERT(Model):
                 optimizer.zero_grad()
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
-                outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
+                if self.input_task == "classification":
+                    labels = batch['labels'].to(device)
+                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss
+                elif self.input_task == "regression":
+                    labels = batch['labels'].to(device)  # Assuming true_range is provided in the batch
+                    outputs = self.model(input_ids, attention_mask=attention_mask)
+                    # Modify the loss function for regression task
+                    loss = nn.MSELoss()(outputs.logits.squeeze(), labels.float())
                 loss.backward()
                 optimizer.step()
-            
+
                 # Store labels, predictions and probabilities for metrics calculation
                 preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
                 losses.append(loss.item())
                 all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
-                class_preds = torch.argmax(preds, dim=-1)
-                all_preds.append(class_preds.cpu().numpy())
-                all_labels.append(labels.cpu().numpy())
+                if self.input_task == "classification":
+                    class_preds = torch.argmax(preds, dim=-1)
+                elif self.input_task == "regression":
+                    class_preds = outputs.logits.squeeze()  # For regression, use logits directly
+                all_preds.append(class_preds.cpu().detach().numpy())
+                all_labels.append(labels.cpu().detach().numpy())
 
             # Calculate and log metrics after each epoch
             all_labels = np.concatenate(all_labels)
             all_preds = np.concatenate(all_preds)
             all_probs = np.concatenate(all_probs)  # Concatenate probabilities
-            results[epoch] = self.compute_metrics(all_labels, all_preds, all_probs)
-            
+            if self.input_task == "classification":
+                results[epoch] = self.compute_metrics_classification(all_labels, all_preds, all_probs)
+            elif self.input_task == "regression":
+                results[epoch] = self.compute_metrics_regression(all_labels, all_preds)
+
             # Save the model after each epoch
-            torch.save(self.model.state_dict(), self.save_path)
+            # torch.save(self.model.state_dict(), self.save_path)
 
         # metrics for each epoch
         return results
@@ -95,6 +117,7 @@ class CryptoBERT(Model):
         """
         # Evaluation loop
         results = {}
+        self.model.to(device)
         eval_loss = 0
         all_labels = []
         all_preds = []
@@ -103,30 +126,38 @@ class CryptoBERT(Model):
             with torch.no_grad():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
-                outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-                eval_loss += outputs.loss.item()
+                if self.input_task == "classification":
+                    labels = batch['labels'].to(device)
+                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+                    eval_loss += outputs.loss.item()
+                    # Get the predicted probabilities from the model's outputs
+                    preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                    # Convert the probabilities to class labels
+                    class_preds = torch.argmax(preds, dim=-1)
+                    all_probs.append(preds.cpu().numpy())  # Store probabilities
+                elif self.input_task == "regression":
+                    labels = batch['labels'].to(device)
+                    outputs = self.model(input_ids, attention_mask=attention_mask)
+                    preds = outputs.logits.squeeze()  # For regression, use logits directly
+                all_preds.append(preds.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
-                # Get the predicted probabilities from the model's outputs
-                preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                all_probs.append(preds.cpu().numpy())  # Store probabilities
-                # Convert the probabilities to class labels
-                class_preds = torch.argmax(preds, dim=-1)
-                all_preds.append(class_preds.cpu().numpy())
-        
+
         # Calculate metrics
         all_labels = np.concatenate(all_labels)
         all_preds = np.concatenate(all_preds)
-        all_probs = np.concatenate(all_probs)  # Concatenate probabilities
-    
-        results = self.compute_metrics(all_labels, all_preds, all_probs)
+        if self.input_task == "classification":
+            all_probs = np.concatenate(all_probs)  # Concatenate probabilities
+            results = self.compute_metrics_classification(all_labels, all_preds, all_probs)
+        elif self.input_task == "regression":
+            results = self.compute_metrics_regression(all_labels, all_preds)
 
         return results
 
+
     @staticmethod
-    def compute_metrics(labels, preds, probs):
+    def compute_metrics_classification(labels, preds, probs):
         """
-        Compute metrics based on the model's predictions and the true labels.
+        Compute classification metrics based on the model's predictions and the true labels.
 
         Args:
         labels (any): The true labels.
@@ -134,11 +165,11 @@ class CryptoBERT(Model):
         probs (any): The model's probabilities
 
         Returns:
-        dict: The computed metrics.
+        dict: The computed classification metrics.
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
-        
+
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
 
@@ -152,27 +183,59 @@ class CryptoBERT(Model):
         }
 
         return metrics
+    
+    
+    @staticmethod
+    def compute_metrics_regression(labels, preds):
+        """
+        Compute regression metrics based on the model's predictions and the true labels.
+
+        Args:
+        labels (any): The true labels.
+        preds (any): The model's predictions.
+
+        Returns:
+        dict: The computed regression metrics.
+        """
+        mae = mean_absolute_error(labels, preds)
+        mse = mean_squared_error(labels, preds)
+
+        # Create a dictionary of metrics
+        metrics = {
+            "mean_absolute_error": mae,
+            "mean_squared_error": mse
+        }
+
+        return metrics
 
 
-    def get_trainer(self, eval_dataset):
-        
-        def compute_metrics(pred):    
+    def get_trainer(self, eval_dataset, train_dataset=None):
+        print(f'the input task: {self.input_task}')
+        def compute_metrics_regression(pred):
+            labels = pred.label_ids
+            preds = pred.predictions.squeeze()  # For regression, use predictions directly
+            mae = mean_absolute_error(labels, preds)
+            mse = mean_squared_error(labels, preds)
+            return {
+                'mean_absolute_error': mae,
+                'mean_squared_error': mse
+            }
+
+        def compute_metrics_classification(pred):
             labels = pred.label_ids
             preds = pred.predictions.argmax(-1)
             probs = softmax(pred.predictions, axis=1)
             precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
             acc = accuracy_score(labels, preds)
             roc_auc = roc_auc_score(labels, probs, multi_class='ovr')
-
-            # Compute confusion matrix
             conf_matrix = confusion_matrix(labels, preds)
-
+            
             # Plot confusion matrix
             # disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Up', 'Neutral', 'Down'])
             # disp.plot(cmap='Blues', values_format='d')
             # plt.title('Confusion Matrix')
             # plt.show()
-
+            
             return {
                 'accuracy': acc,
                 'f1': f1,
@@ -182,14 +245,25 @@ class CryptoBERT(Model):
                 'confusion_matrix': conf_matrix
             }
 
+        # Choose compute_metrics function based on the task type
+        if self.input_task == "classification":
+            compute_metrics_func = compute_metrics_classification
+        elif self.input_task == "regression":
+            compute_metrics_func = compute_metrics_regression
+
+        print(f'the compute metric fun: {compute_metrics_func}')
+        # Define Trainer arguments
         trainer_args = TrainingArguments(
             output_dir=self.save_path,
         )
+
+        # Create Trainer instance
         trainer = Trainer(
             model=self.model,                 # the non-fine-tuned model
             args=trainer_args,                # training arguments, defined above
+            train_dataset=train_dataset,
             eval_dataset=eval_dataset,        # test dataset
-            compute_metrics=compute_metrics,   # the compute_metrics function
+            compute_metrics=compute_metrics_func,   # the compute_metrics function
             callbacks=[]
         )
 
