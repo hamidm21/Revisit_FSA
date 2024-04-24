@@ -16,6 +16,7 @@ datasets = "2.18.0"
 scikit-learn = "1.4.2"
 torch = "2.2.0"
 accelerate = "^0.29.2"
+neptune = "^1.10.2"
 
 [build-system]
 requires = ["poetry-core"]
