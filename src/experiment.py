@@ -6,7 +6,6 @@ import pandas as pd
 from transformers import (
     AutoTokenizer,
     AutoModel,
-    TrainerCallback,
 )
 from tqdm import tqdm
 from sklearn.metrics import (
@@ -14,16 +13,29 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
+from sklearn.model_selection import train_test_split
 from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
+from datasets import Dataset
+
 
 # internal imports
 from type import Experiment
 from model import CryptoBERT
-from labeler import TripleBarrierLabeler
+from labeler import TripleBarrierLabeler, TrueRangeLabeler
 from dataset import HFDataset, TextDataset
 from util import *
+from functools import partial
+import os
+from dotenv import load_dotenv
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Access the base address
+base_addr = os.getenv("BASE_ADDRESS")
 
 
 class DirectionSplitTBL(Experiment):
@@ -36,6 +48,7 @@ class DirectionSplitTBL(Experiment):
     ):
         super().__init__(
             id=1,
+            base_addr=base_addr,
             model=CryptoBERT(),
             logger=logger,
             description="""
@@ -76,7 +89,8 @@ class DirectionSplitTBL(Experiment):
         labeled_texts = HFDataset.from_pandas(labeled_texts[["text", "label"]])
         # shuffeling the dataset for a more unbiased mix
         labeled_texts = labeled_texts.shuffle(seed=SEED)
-        # TODO: preprocess the text column
+        # preprocess the text column
+        labeled_texts = HFDataset.preprocess(labeled_texts, labeled_texts)
 
         # tokenizing the dataset text to be used in train and test loops
         tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
@@ -89,6 +103,7 @@ class DirectionSplitTBL(Experiment):
         labeled_texts = labeled_texts.select(range(self.num_samples))
 
         labeled_texts = labeled_texts.train_test_split(TRAIN_TEST_SPLIT)
+        print(labeled_texts)
 
         trainer = self.model.get_trainer(labeled_texts["test"])
 
@@ -101,7 +116,7 @@ class DirectionSplitTBL(Experiment):
             self.results["base"][key] = value
 
         self.logger.info(f"preparing data for finetuning the model...")
-        train_dataset = TextDataset(labeled_texts['test'])
+        train_dataset = TextDataset(labeled_texts['train'])
         test_dataset = TextDataset(labeled_texts['test'])
 
         train_dataloader = DataLoader(train_dataset, batch_size=TRAINING_BATCH_SIZE)
@@ -138,36 +153,262 @@ class DirectionSplitTBL(Experiment):
         return text_df, price_df
 
 class DirectionSplitSentiment(Experiment):
-    def __init__(self):
+    def __init__(
+        self,
+        num_samples=100,
+        tweets_dataset_addr = 'raw/st-data-full.csv',
+        logger=None
+        ):
         super().__init__(
             id=2,
+            base_addr=base_addr,
+            logger=logger,
             description="""
-                comparing base cryptoBERT model to finetuned cryptoBERT on sentiment labelings
+                comparing base cryptoBERT model to finetuned cryptoBERT on sentiment labels
             """
         )
+        self.num_samples = num_samples
+        self.tweets_dataset_addr = tweets_dataset_addr
+        self.results = {}
+        
+    def run(self):
+        self.start_time = datetime.datetime.now()
+        self.logger.info(f"started experiment at {self.start_time}")
+        
+        # Load the data
+        self.logger.info(f"loading the data...")
+        tweets_df = self.load_data()
+        
+        # Create a HuggingFace dataset
+        self.logger.info(f"creating and tokenizing the dataset...")
+        tweets_dataset = HFDataset.from_pandas(tweets_df)
+        
+        # Tokenize the text field in the dataset
+        def tokenize_function(tokenizer, examples):
+            # Tokenize the text and return only the necessary fields
+            encoded = tokenizer(examples["text"], padding='max_length', max_length=512)
+            return {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"], "label": examples["label"]}
+        
+        # tokenizing the dataset text to be used in train and test loops
+        tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
+        partial_tokenize_function = partial(tokenize_function, tokenizer)
+        
+        # Tokenize the text in the datasets
+        tokenized_dataset = tweets_dataset.map(partial_tokenize_function, batched=True)
+        
+        # Load the base model
+        base_model = CryptoBERT(save_path=f'{base_addr}/artifacts/base_model_DSS_eval.pth')
+        
+        load_path = base_addr + '/artifacts/fine_tuned_model.pth'
+        fine_tuned_model = CryptoBERT(load_state_dict=True, load_path=load_path, save_path=f'{base_addr}/artifacts/fine_tuned_model_DSS_eval.pth')
+        
+        # Prepare the base model for evaluation
+        base_model_trainer = base_model.get_trainer(tokenized_dataset)
+        
+        self.logger.info(f'evaluating the base model...')
+        # Evaluate the base model
+        base_model_eval_result = base_model_trainer.evaluate()    
+        
+        # Log metrics
+        self.results["base_model_DSS"] = {}
+        for key, value in base_model_eval_result.items():
+            self.results["base_model_DSS"][key] = value
+            
+        # Prepare the fine-tuned model for evaluation
+        fine_tuned_model_trainer = fine_tuned_model.get_trainer(tokenized_dataset)
+        
+        self.logger.info(f'evaluating the fine-tuned model...')
+        # Evaluate the fine-tuned model
+        fine_tuned_model_eval_result = fine_tuned_model_trainer.evaluate()    
+        
+        # Log metrics
+        self.results["fine_tuned_model_DSS"] = {}
+        for key, value in fine_tuned_model_eval_result.items():
+            self.results["fine_tuned_model_DSS"][key] = value
+            
+        self.end_time = datetime.datetime.now()
+        return self.results
+
+    
+    def load_data(self):
+        """
+        Load the data from the given address.
+        """
+        tweets_df = pd.read_csv(self.tweets_dataset_addr)
+        tweets_df = tweets_df.sample(n=self.num_samples, random_state=42)
+        tweets_df = tweets_df[["text", "label"]]
+        return tweets_df
 
 class DirectionCrossValidate(Experiment):
     def __init__(self):
         super().__init__(
             id=3,
+            base_addr=base_addr,
             description="""
                 crossvalidating the base and finetuned model on impact direction labelings
             """
         )
 
 class IntensitySplit(Experiment):
-    def __init__(self):
+    def __init__(
+        self,
+        num_samples=100,
+        price_df_addr="raw/daily-2020.csv",
+        text_df_addr="raw/combined_tweets_2020_labeled.csv",
+        logger=None
+        ):
         super().__init__(
             id=4,
+            base_addr=base_addr,
+            model=None,
+            logger=logger,
             description="""
                 finetuning cryptoBERT on impact intensity
             """
         )
+        self.num_samples = num_samples
+        self.price_df_addr = price_df_addr
+        self.text_df_addr = text_df_addr
+        self.results = {}
+        
+    def run(self):
+        SEED=42
+        TRAIN_TEST_SPLIT=0.2
+        BATCH_SIZE=5
+        EPOCHS=3
+        LEARNING_RATE=1e-5
+        
+        self.start_time = datetime.datetime.now()
+        self.logger.info(f"started experiment at {self.start_time}")
+        
+        # Load and label the data
+        self.logger.info(f"loading the data...")
+        text_df, price_df = self.load_data()
+        self.labeler = TrueRangeLabeler(price_df)
+        true_range_data = self.labeler.transform()
+        labeled_df = text_df.merge(true_range_data[['label']], left_index=True, right_index=True, how='left')
+        
+        # Drop rows with NaN labels (corresponding to the last day)
+        labeled_df = labeled_df.dropna()
+                
+        # creating a hugging face dataset for base model evaluation
+        self.logger.info(f"creating and tokenizing the dataset...")
+
+        # Split the dataset into training and testing subsets with stratification
+        # train_df, test_df = train_test_split(labeled_df, test_size=TRAIN_TEST_SPLIT, random_state=SEED, stratify=labeled_df['label'])
+        train_df, test_df = train_test_split(labeled_df, test_size=TRAIN_TEST_SPLIT, random_state=SEED)
+        
+        # Create Dataset objects from the split dataframes
+        train_dataset = Dataset.from_pandas(train_df[['text', 'label']])
+        test_dataset = Dataset.from_pandas(test_df[['text', 'label']])
+
+        # Tokenize the text field in the dataset
+        def tokenize_function(tokenizer, examples):
+            # Tokenize the text and return only the necessary fields
+            encoded = tokenizer(examples["text"], padding='max_length', max_length=512)
+            return {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"], "label": examples["label"]}
+        
+        # tokenizing the dataset text to be used in train and test loops
+        tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
+        partial_tokenize_function = partial(tokenize_function, tokenizer)
+        
+        # Tokenize the text in the datasets
+        tokenized_train_dataset = train_dataset.map(partial_tokenize_function, batched=True)
+        tokenized_test_dataset = test_dataset.map(partial_tokenize_function, batched=True)
+        
+        tokenized_train_dataset = tokenized_train_dataset.select(range(8 * self.num_samples))
+        tokenized_test_dataset = tokenized_test_dataset.select(range(int(2 * self.num_samples)))
+        
+        # 5. Evaluation of Base CryptoBERT Model
+        base_model = CryptoBERT(input_task='regression')
+        
+        # Remove the '__index_level_0__' column from the dataset
+        if '__index_level_0__' in tokenized_train_dataset.column_names:
+            tokenized_train_dataset = tokenized_train_dataset.remove_columns('__index_level_0__')
+        
+        # Remove the '__index_level_0__' column from the dataset
+        if '__index_level_0__' in tokenized_test_dataset:
+            tokenized_test_dataset = tokenized_test_dataset.remove_columns('__index_level_0__')
+
+        train_dataset = TextDataset(tokenized_train_dataset)
+        test_dataset = TextDataset(tokenized_test_dataset)
+        
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+        # Create DataLoader
+        eval_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+        # Evaluate the model using the DataLoader
+        self.logger.info(f"evaluating the base model...")
+        base_model_eval_results = base_model.evaluate(dataloader=eval_dataloader, device=device)
+
+        # Print evaluation results
+        print(f'Base Model Evaluation Results: {base_model_eval_results}')
+        
+        # Log metrics
+        self.results["base_model_intensity_split"] = {}
+        for key, value in base_model_eval_results.items():
+            self.results["base_model_intensity_split"][key] = value
+            
+        # Instantiate the CryptoBERT model for regression task
+        fine_tuned_model = CryptoBERT(input_task='regression', save_path=f'{self.base_addr}/artifacts/exp3_fine_tuned_model.pth')
+        
+        # Create DataLoader
+        train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE)
+
+        # Train the model
+        self.logger.info(f"training the model on the training dataset...")
+        train_results = fine_tuned_model.train(
+            dataloader=train_dataloader,
+            device=device,
+            learning_rate=LEARNING_RATE,
+            epochs=EPOCHS
+        )
+        
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+        # Create DataLoader
+        test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+
+        # Evaluate the model using the DataLoader
+        self.logger.info(f'evaluating the fine-tuned model...')
+        fine_tuned_model_test_results = fine_tuned_model.evaluate(dataloader=test_dataloader, device=device)
+
+        # Print test results
+        print(f'Fine-Tuned Model Test Results: {fine_tuned_model_test_results}')
+        
+        # Log metrics
+        self.results["fine_tuned_model_intensity_split"] = {}
+        for key, value in fine_tuned_model_test_results.items():
+            self.results["fine_tuned_model_intensity_split"][key] = value
+            
+        self.end_time = datetime.datetime.now()
+        return self.results
+        
+    def load_data(self):
+        """
+        Load the data from the given address.
+        """
+        
+        text_df = pd.read_csv(self.text_df_addr, usecols=["date", "text_split"])
+        text_df.rename(columns={"text_split": "text"}, inplace=True)
+        text_df.set_index('date', inplace=True)
+        text_df.index = pd.to_datetime(text_df.index)
+        
+        price_df = pd.read_csv(self.price_df_addr, usecols=["timestamp", "close", "open", "high", "low", "volume"])
+        price_df.set_index('timestamp', inplace=True)
+        price_df.index = pd.to_datetime(price_df.index, unit='s')
+        
+        # Shift the Bitcoin price data by one day forward
+        price_df = price_df.shift(-1)
+        
+        return text_df, price_df
 
 class ScoreSplit(Experiment):
     def __init__(self):
         super().__init__(
             id=5,
+            base_addr=base_addr,
             description="""
                 finetuning cryptoBERT on impact score
             """

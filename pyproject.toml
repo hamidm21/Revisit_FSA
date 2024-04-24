@@ -7,7 +7,7 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.13"
 pandas = "2.2.2"
 numpy = "1.26.4"
 transformers = "4.39.3"
@@ -17,6 +17,13 @@ scikit-learn = "1.4.2"
 torch = "2.2.0"
 accelerate = "^0.29.2"
 neptune = "^1.10.2"
+plotly = "5.20.0"
+seaborn = "0.13.0"
+scipy = "1.11.3"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.4"
+jupyter = "^1.0.0"
 
 [build-system]
 requires = ["poetry-core"]
