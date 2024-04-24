@@ -25,7 +25,7 @@ def label_ROC(df, window_size):
 
     return labels
 
-def triple_barrier_labeling(sdf, volatility_period=1, upper_barrier_factor=1, lower_barrier_factor=1, vertical_barrier_timedelta=timedelta(days=1)):
+def triple_barrier_labeling(sdf, volatility_period=4, upper_barrier_factor=1, lower_barrier_factor=1, vertical_barrier_timedelta=timedelta(days=7)):
     df = sdf.copy()
     # Define your barriers
     df['upper_barrier'] = df['close'] + df['close'].rolling(volatility_period).std() * upper_barrier_factor
