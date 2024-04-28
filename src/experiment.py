@@ -17,7 +17,7 @@ from sklearn.model_selection import train_test_split
 from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
-from datasets import Dataset
+from datasets import Dataset, ClassLabel
 
 
 # internal imports
@@ -66,11 +66,14 @@ class DirectionSplitTBL(Experiment):
 
     def run(self):
         # constants
-        SEED=42
-        TRAIN_TEST_SPLIT=0.2
-        TRAINING_BATCH_SIZE=5
-        EPOCHS=2
-        LEARNING_RATE=1e-5
+        params = {
+            "samples": self.num_samples,
+            "SEED":42,
+            "TRAIN_TEST_SPLIT":0.2,
+            "TRAINING_BATCH_SIZE":5,
+            "EPOCHS":2,
+            "LEARNING_RATE":1e-5,
+        }
 
         self.start_time = datetime.datetime.now()
         self.logger.info(f"started experiment at {self.start_time}")
@@ -87,10 +90,18 @@ class DirectionSplitTBL(Experiment):
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
         labeled_texts = HFDataset.from_pandas(labeled_texts[["text", "label"]])
-        # shuffeling the dataset for a more unbiased mix
-        labeled_texts = labeled_texts.shuffle(seed=SEED)
         # preprocess the text column
-        labeled_texts = HFDataset.preprocess(labeled_texts, labeled_texts)
+        self.logger.info(f"preprocessing the dataset...")
+        labeled_texts = HFDataset.preprocess(labeled_texts)
+
+        self.logger.info(f"slicing and spliting the dataset...")
+        # Spliting the dataset for evaluation
+
+        self.logger.info(f"changing the label type of the dataset...")
+        labeled_texts = labeled_texts.shuffle()
+        labeled_texts = labeled_texts.select(range(self.num_samples))
+        labeled_texts = labeled_texts.class_encode_column('label')
+        labeled_texts = labeled_texts.train_test_split(params["TRAIN_TEST_SPLIT"], seed=42)
 
         # tokenizing the dataset text to be used in train and test loops
         tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
@@ -98,38 +109,37 @@ class DirectionSplitTBL(Experiment):
             tokenizer, labeled_texts
         )
 
-        self.logger.info(f"slicing and spliting the dataset...")
-        # Spliting the dataset for evaluation
-        labeled_texts = labeled_texts.select(range(self.num_samples))
-
-        labeled_texts = labeled_texts.train_test_split(TRAIN_TEST_SPLIT)
-        print(labeled_texts)
-
-        trainer = self.model.get_trainer(labeled_texts["test"])
-
+        neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
+        trainer = self.model.get_trainer(labeled_texts["test"], neptune_run=neptune_run)
         self.logger.info(f"evaluating the base model without fintuning...")
         non_fine_tuned_eval_result = trainer.evaluate()
-
         # Log metrics
         self.results["base"] = {}
         for key, value in non_fine_tuned_eval_result.items():
             self.results["base"][key] = value
+            neptune_run[f"eval/{key}"].append(value)
+
+        neptune_run.stop()
 
         self.logger.info(f"preparing data for finetuning the model...")
         train_dataset = TextDataset(labeled_texts['train'])
         test_dataset = TextDataset(labeled_texts['test'])
 
-        train_dataloader = DataLoader(train_dataset, batch_size=TRAINING_BATCH_SIZE)
-        test_dataloader = DataLoader(test_dataset, batch_size=TRAINING_BATCH_SIZE)
+        train_dataloader = DataLoader(train_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
+        test_dataloader = DataLoader(test_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
 
         self.logger.info(f"training the model...")
+        neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        train_metrics = self.model.train(dataloader=train_dataloader, device=device, learning_rate=LEARNING_RATE, epochs=EPOCHS)
+        train_metrics = self.model.train(dataloader=train_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
         self.results["train"] = train_metrics
+        neptune_run.stop()
 
         self.logger.info(f"evaluating the finetuned model...")
-        eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=device)
+        neptune_run = self.init_neptune_run("#1.3", description="evaluating the base model without fintuning", params=params)
+        eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=device, neptune_run=neptune_run)
         self.results["eval"] = eval_metrics
+        neptune_run.stop()
 
         self.end_time = datetime.datetime.now()
         return self.results
