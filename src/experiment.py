@@ -83,9 +83,11 @@ class DirectionSplitTBL(Experiment):
         text_df, price_df = self.load_data()
         self.labeler.fit(price_df)
         triple_barrier_labels = self.labeler.transform()
+        triple_barrier_labels["label"] = triple_barrier_labels["label"].shift(-1)
         labeled_texts = text_df.merge(
             triple_barrier_labels[["label"]], left_index=True, right_index=True, how="left"
         )
+        labeled_texts.dropna(inplace=True)
 
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
