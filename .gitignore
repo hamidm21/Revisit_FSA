@@ -172,3 +172,5 @@ mlruns
 
 # Saved model checkpoints
 artifacts/*
+
+.neptune
