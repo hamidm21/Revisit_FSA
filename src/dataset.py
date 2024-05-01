@@ -13,7 +13,7 @@ class HFDataset(HuggingfaceDataset):
     #     super().__init__()
 
 
-    def preprocess(self, dataset, return_emojis = False, return_hashtags = False):
+    def preprocess(self, return_emojis = False, return_hashtags = False):
         ads_keywords = ["nft", "bonus", "campaign", "invite", "friends"]
         def run_all_preprocess_functions(item):
             text_list = item['text']
@@ -45,7 +45,7 @@ class HFDataset(HuggingfaceDataset):
 
 
 
-        preprocessed_data =  dataset.map(run_all_preprocess_functions, batched = True)
+        preprocessed_data =  self.map(run_all_preprocess_functions, batched = True)
         return preprocessed_data
         # self.tokenizer = tokenizer
 

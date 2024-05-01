@@ -1,9 +1,11 @@
 from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments, AdamW
+from transformers.integrations import NeptuneCallback
 from scipy.special import softmax
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squared_error, mean_absolute_error
 import torch
 import torch.nn as nn
+from typing import Optional
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -40,7 +42,7 @@ class CryptoBERT(Model):
         else:
             self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, config=config, ignore_mismatched_sizes=True)
 
-    def train(self, dataloader, device, learning_rate=1e-5, epochs=5):
+    def train(self, dataloader, device, learning_rate=1e-5, epochs=5, neptune_run=None):
         """
         Train the model on the given data and labels.
 
@@ -90,9 +92,14 @@ class CryptoBERT(Model):
             all_preds = np.concatenate(all_preds)
             all_probs = np.concatenate(all_probs)  # Concatenate probabilities
             if self.input_task == "classification":
-                results[epoch] = self.compute_metrics_classification(all_labels, all_preds, all_probs)
+                results[epoch] = self.compute_metrics_classification(all_labels, all_preds, all_probs, neptune_run)
             elif self.input_task == "regression":
                 results[epoch] = self.compute_metrics_regression(all_labels, all_preds)
+
+            # Log metrics to Neptune
+            if neptune_run:
+                for key, value in results[epoch].items():
+                    neptune_run[f"train/{key}"].log(value)
 
             # Save the model after each epoch
             # torch.save(self.model.state_dict(), self.save_path)
@@ -100,11 +107,10 @@ class CryptoBERT(Model):
         # metrics for each epoch
         return results
 
-
     def predict(self, data):
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def evaluate(self, dataloader, device):
+    def evaluate(self, dataloader, device, neptune_run=None):
         """
         Evaluate the model on the given data and labels.
 
@@ -139,7 +145,7 @@ class CryptoBERT(Model):
                     labels = batch['labels'].to(device)
                     outputs = self.model(input_ids, attention_mask=attention_mask)
                     preds = outputs.logits.squeeze()  # For regression, use logits directly
-                all_preds.append(preds.cpu().numpy())
+                all_preds.append(class_preds.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
 
         # Calculate metrics
@@ -147,15 +153,20 @@ class CryptoBERT(Model):
         all_preds = np.concatenate(all_preds)
         if self.input_task == "classification":
             all_probs = np.concatenate(all_probs)  # Concatenate probabilities
-            results = self.compute_metrics_classification(all_labels, all_preds, all_probs)
+            results = self.compute_metrics_classification(all_labels, all_preds, all_probs, neptune_run)
         elif self.input_task == "regression":
             results = self.compute_metrics_regression(all_labels, all_preds)
 
+        # Log metrics to Neptune
+        if neptune_run:
+            for key, value in results.items():
+                neptune_run[f"eval/{key}"].log(value)
+
         return results
 
-
     @staticmethod
-    def compute_metrics_classification(labels, preds, probs):
+    def compute_metrics_classification(labels, preds, probs, neptune_run=None):
+        print(labels, preds)
         """
         Compute classification metrics based on the model's predictions and the true labels.
 
@@ -169,9 +180,19 @@ class CryptoBERT(Model):
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
-
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
+
+        # Plot confusion matrix
+        disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
+        fig, ax = plt.subplots(figsize=(10, 10))
+        disp.plot(ax=ax, cmap='Blues', values_format='d')
+        plt.title('Confusion Matrix')
+        # Save the confusion matrix to a file
+        plt.savefig("./result/exp1/finetuned_training_confusion_matrix.png")
+        # Log the confusion matrix image to Neptune
+        if neptune_run:
+            neptune_run["confusion_matrix"].upload("./result/exp1/finetuned_training_confusion_matrix.png")
 
         # Create a dictionary of metrics
         metrics = {
@@ -179,12 +200,10 @@ class CryptoBERT(Model):
             "f1": f1,
             "precision": precision,
             "recall": recall,
-            'confusion_matrix': conf_matrix
         }
 
         return metrics
-    
-    
+
     @staticmethod
     def compute_metrics_regression(labels, preds):
         """
@@ -209,8 +228,9 @@ class CryptoBERT(Model):
         return metrics
 
 
-    def get_trainer(self, eval_dataset, train_dataset=None):
+    def get_trainer(self, eval_dataset, neptune_run: Optional[object] = None, train_dataset=None):
         print(f'the input task: {self.input_task}')
+
         def compute_metrics_regression(pred):
             labels = pred.label_ids
             preds = pred.predictions.squeeze()  # For regression, use predictions directly
@@ -227,22 +247,31 @@ class CryptoBERT(Model):
             probs = softmax(pred.predictions, axis=1)
             precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
             acc = accuracy_score(labels, preds)
-            roc_auc = roc_auc_score(labels, probs, multi_class='ovr')
-            conf_matrix = confusion_matrix(labels, preds)
-            
-            # Plot confusion matrix
-            # disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Up', 'Neutral', 'Down'])
-            # disp.plot(cmap='Blues', values_format='d')
-            # plt.title('Confusion Matrix')
-            # plt.show()
-            
+            roc_auc=0
+            conf_matrix=0
+            try:
+                roc_auc = roc_auc_score(labels, probs, multi_class='ovr')
+            except:
+                pass
+            try:
+                conf_matrix = confusion_matrix(labels, preds)
+                # Plot confusion matrix
+                disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
+                fig, ax = plt.subplots(figsize=(10, 10))
+                disp.plot(ax=ax, cmap='Blues', values_format='d')
+                plt.title('Confusion Matrix')
+                # Save the confusion matrix to a file
+                plt.savefig("./result/exp1/base_confusion_matrix.png")
+                # Log the confusion matrix image to Neptune
+                if neptune_run:
+                    neptune_run["confusion_matrix"].upload("./result/exp1/base_confusion_matrix.png")
+            except:
+                pass
             return {
                 'accuracy': acc,
                 'f1': f1,
                 'precision': precision,
                 'recall': recall,
-                'roc_auc': roc_auc,
-                'confusion_matrix': conf_matrix
             }
 
         # Choose compute_metrics function based on the task type
@@ -251,10 +280,10 @@ class CryptoBERT(Model):
         elif self.input_task == "regression":
             compute_metrics_func = compute_metrics_regression
 
-        print(f'the compute metric fun: {compute_metrics_func}')
         # Define Trainer arguments
         trainer_args = TrainingArguments(
             output_dir=self.save_path,
+            report_to="none"
         )
 
         # Create Trainer instance
@@ -264,7 +293,6 @@ class CryptoBERT(Model):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,        # test dataset
             compute_metrics=compute_metrics_func,   # the compute_metrics function
-            callbacks=[]
         )
 
         return trainer

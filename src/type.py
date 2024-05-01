@@ -1,4 +1,6 @@
 from logging import Logger
+import neptune
+
 class Experiment:
     def __init__(self, id: int, description: str, base_addr: str, logger: Logger=None, data_addr: str=None, model: any=None):
         """
@@ -47,6 +49,25 @@ class Experiment:
             "results": self.results,
         }
         return report
+
+    @staticmethod
+    def init_neptune_run(name, description, params):
+        """
+        initializes and returns an instance of neptune run and sends the parameters
+        """
+        run = neptune.init_run(
+        proxies={
+            "http": "http://tracker:nlOv5rC7cL3q3bYR@95.216.41.71:3128",
+            "https": "http://tracker:nlOv5rC7cL3q3bYR@95.216.41.71:3128"
+        },
+        project="Financial-NLP/market-aware-embedding",
+        api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiI2YWViODAxNC05MzNkLTRiZGMtOGI4My04M2U3MDViN2U3ODEifQ==",
+        name=name,
+        description=description
+        )
+
+        run["parameters"] = params
+        return run
 
     def __str__(self):
         return self.description

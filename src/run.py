@@ -11,7 +11,7 @@ root_dir = os.path.abspath("$HOME/src/Financial_NLP")
 sys.path.append(root_dir)
 
 # Create and configure logger
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 def runner(args):
