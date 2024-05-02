@@ -41,7 +41,7 @@ base_addr = os.getenv("BASE_ADDRESS")
 class DirectionSplitTBL(Experiment):
     def __init__(
         self,
-        num_samples=100,
+        num_samples=60000,
         price_df_addr="raw/daily-2020.csv",
         text_df_addr="raw/combined_tweets_2020_labeled.csv",
         logger=None
