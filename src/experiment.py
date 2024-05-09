@@ -450,7 +450,7 @@ class TextualFeatureContextAware(Experiment):
         self.num_samples = num_samples
         # hard code essentials
         self.labeler = TripleBarrierLabeler()
-
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.results = {}
 
     def run(self):
@@ -473,7 +473,6 @@ class TextualFeatureContextAware(Experiment):
         text_df, price_df = self.load_data()
         
         self.labeler.fit(price_df)
-        
         price_df = self.labeler.transform()
         price_df["text_label"] = price_df.label.map({0: 'bearish', 1: 'neutral', 2: 'bullish'})
         price_df["label"] = price_df.label.shift(-1)
@@ -481,15 +480,15 @@ class TextualFeatureContextAware(Experiment):
         
         text_df = self.extract_time_string(text_df)
         
-        labeled_df = text_df.merge(
+        labeled_texts = text_df.merge(
             price_df[["label", "text_label"]], left_index=True, right_index=True, how="left"
         )
-        labeled_df = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
-        labeled_df.dropna(inplace=True)
+        labeled_texts = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
+        labeled_texts.dropna(inplace=True)
 
         # Select equal numbers of tweets from each day in the dataset
         how_many_tweets_per_day = 100
-        sampled_df = self.select_equal_samples(labeled_df, how_many_tweets_per_day)
+        sampled_df = self.select_equal_samples(labeled_texts, how_many_tweets_per_day)
         
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
@@ -497,7 +496,7 @@ class TextualFeatureContextAware(Experiment):
         
         # preprocess the text column
         self.logger.info(f"preprocessing the dataset...")
-        labeled_texts = HFDataset.preprocess(labeled_texts)
+        # labeled_texts = HFDataset.preprocess(labeled_texts)
 
         self.logger.info(f"slicing and spliting the dataset...")
         # Spliting the dataset for evaluation
@@ -541,7 +540,7 @@ class TextualFeatureContextAware(Experiment):
 
         self.logger.info(f"Evaluating the base model on textual dataset...")        
         neptune_run = self.init_neptune_run("#6.1: base_model", description="evaluating the base model without fine-tuning", params=params)
-        base_model_eval_metrics = self.model.evaluate(tokenized_test_text_dataloader, device=device, neptune_run=neptune_run)
+        base_model_eval_metrics = self.model.evaluate(tokenized_test_text_dataloader, device=self.device, neptune_run=neptune_run)
         self.results["base_model_eval_metrics"] = base_model_eval_metrics
         neptune_run.stop()
         
@@ -552,29 +551,29 @@ class TextualFeatureContextAware(Experiment):
         #     neptune_run[f"eval/{key}"].append(value)
         # neptune_run.stop()
 
-        self.logger.info(f"training and evaluating the model on textual dataset...")
+        self.logger.info(f"Training and evaluating the model on textual dataset...")
         neptune_run = self.init_neptune_run(name="#6.2: base_text_model", description="base model fine-tuned and evaluated on textual data without temporal or market context", params=params)
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        
         text_trained_model = CryptoBERT()
-        train_metrics = text_trained_model.train(dataloader=tokenized_train_text_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        train_metrics = text_trained_model.train(dataloader=tokenized_train_text_dataloader, device=self.device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
         self.results["textual_fine_tuned_model"] = train_metrics
-        text_trained_model_eval_metrics = text_trained_model.evaluate(tokenized_test_text_dataloader, device=device, neptune_run=neptune_run)
+        text_trained_model_eval_metrics = text_trained_model.evaluate(tokenized_test_text_dataloader, device=self.device, neptune_run=neptune_run)
         self.results["textual_fine_tuned_model_eval_metrics"] = text_trained_model_eval_metrics
         neptune_run.stop()
 
         # self.logger.info(f"evaluating the finetuned model...")
         # neptune_run = self.init_neptune_run("#1.3", description="evaluating the base model without fintuning", params=params)
-        # eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=device, neptune_run=neptune_run)
+        # eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=self.device, neptune_run=neptune_run)
         # self.results["eval"] = eval_metrics
         # neptune_run.stop()
         
         self.logger.info(f"training and evaluating the model on context-aware dataset...")
         neptune_run = self.init_neptune_run(name="#6.3: temporal_context_model", description="temporal context-aware model fine-tuned and evaluated on context-aware dataset with temporal or market context", params=params)
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
         context_trained_model = CryptoBERT()
-        train_metrics = context_trained_model.train(dataloader=tokenized_train_context_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        train_metrics = context_trained_model.train(dataloader=tokenized_train_context_dataloader, device=self.device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
         self.results["temporal_context_fine_tuned_model"] = train_metrics
-        context_trained_model_eval_metrics = context_trained_model.evaluate(tokenized_test_context_dataloader, device=device, neptune_run=neptune_run)
+        context_trained_model_eval_metrics = context_trained_model.evaluate(tokenized_test_context_dataloader, device=self.device, neptune_run=neptune_run)
         self.results["temporal_context_fine_tuned_model_eval_metrics"] = context_trained_model_eval_metrics
         neptune_run.stop()
 
@@ -599,14 +598,14 @@ class TextualFeatureContextAware(Experiment):
 
         return text_df, price_df
     
-    def extract_time_string(df):
+    def extract_time_string(self, df):
         """
         Extract time string from date column to be used in the tweet
         """
         df['time'] = df.index.to_series().dt.strftime('%d,%b,%Y')
         return df
     
-    def prefix_text_column(df, time_col, trend_col, text_col):
+    def prefix_text_column(self, df, time_col, trend_col, text_col):
         """
         Prefix a text column with temporal and market context.
 
@@ -625,7 +624,7 @@ class TextualFeatureContextAware(Experiment):
         # Return the DataFrame
         return df
     
-    def select_equal_samples(df, n_samples):
+    def select_equal_samples(self, df, n_samples):
         """
         Select equal numbers of tweets from each day in the dataset.
 
