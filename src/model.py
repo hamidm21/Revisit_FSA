@@ -34,6 +34,8 @@ class CryptoBERT(Model):
         # Adjust configuration for regression task
         if input_task == "regression":
             config.num_labels = 1  # Adjust for regression task
+        elif input_task == "classification":
+            config.num_labels = 3  # Adjust for classification task
         
         # Load model with modified configuration
         if load_state_dict:

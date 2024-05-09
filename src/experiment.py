@@ -426,10 +426,239 @@ class ScoreSplit(Experiment):
             """
         )
 
+
+class TextualFeatureContextAware(Experiment):
+    def __init__(
+        self,
+        num_samples=1000,
+        price_df_addr="raw/daily-2020.csv",
+        text_df_addr="raw/combined_tweets_2020_labeled.csv",
+        logger=None
+    ):
+        super().__init__(
+            id=6,
+            base_addr=base_addr,
+            model=CryptoBERT(),
+            logger=logger,
+            description="""
+                comparing fine-tuned model on textual dataset with fine-tuned model on context-aware dataset
+                """,
+        )
+
+        self.price_df_addr = price_df_addr
+        self.text_df_addr = text_df_addr
+        self.num_samples = num_samples
+        # hard code essentials
+        self.labeler = TripleBarrierLabeler()
+
+        self.results = {}
+
+    def run(self):
+        # constants
+        params = {
+            "samples": self.num_samples,
+            "BATCH_SIZE":10,
+            "SEED":42,
+            "TRAIN_TEST_SPLIT":0.2,
+            "TRAINING_BATCH_SIZE":5,
+            "EPOCHS":10,
+            "LEARNING_RATE":1e-5,
+        }
+
+        self.start_time = datetime.datetime.now()
+        self.logger.info(f"started experiment at {self.start_time}")
+
+        # loading and labeling the data
+        self.logger.info(f"loading and labeling the data...")
+        text_df, price_df = self.load_data()
+        
+        self.labeler.fit(price_df)
+        
+        price_df = self.labeler.transform()
+        price_df["text_label"] = price_df.label.map({0: 'bearish', 1: 'neutral', 2: 'bullish'})
+        price_df["label"] = price_df.label.shift(-1)
+        price_df.dropna(inplace=True)
+        
+        text_df = self.extract_time_string(text_df)
+        
+        labeled_df = text_df.merge(
+            price_df[["label", "text_label"]], left_index=True, right_index=True, how="left"
+        )
+        labeled_df = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
+        labeled_df.dropna(inplace=True)
+
+        # Select equal numbers of tweets from each day in the dataset
+        how_many_tweets_per_day = 100
+        sampled_df = self.select_equal_samples(labeled_df, how_many_tweets_per_day)
+        
+        # creating a huggingface dataset for base model evaluation
+        self.logger.info(f"creating and tokenizing the dataset...")
+        dataset = Dataset.from_pandas(sampled_df[['text', 'context_aware', 'label']])        
+        
+        # preprocess the text column
+        self.logger.info(f"preprocessing the dataset...")
+        labeled_texts = HFDataset.preprocess(labeled_texts)
+
+        self.logger.info(f"slicing and spliting the dataset...")
+        # Spliting the dataset for evaluation
+        dataset = dataset.train_test_split(0.2, shuffle=False)
+
+        # self.logger.info(f"changing the label type of the dataset...")
+        # labeled_texts = labeled_texts.shuffle()
+        # labeled_texts = labeled_texts.select(range(self.num_samples))
+        # labeled_texts = labeled_texts.class_encode_column('label')
+        # labeled_texts = labeled_texts.train_test_split(params["TRAIN_TEST_SPLIT"], seed=42)
+
+        # tokenizing the dataset text to be used in train and test loops
+        # Tokenize the text field in the dataset
+        def tokenize_function(tokenizer, examples, text_col="text"):
+            # Tokenize the text and return only the necessary fields
+            encoded = tokenizer(examples[text_col], padding='max_length', max_length=512)
+            return {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"], "label": examples["label"]}
+
+        tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
+        # labeled_texts = HFDataset.tokenize(
+        #     tokenizer, labeled_texts
+        # )
+        partial_tokenize_function_text = partial(tokenize_function, tokenizer, text_col="text")
+        partial_tokenize_function_context = partial(tokenize_function, tokenizer, text_col="context_aware")
+        
+        # Tokenizing
+        tokenized_train_text = dataset["train"].map(partial_tokenize_function_text, batched=True)
+        tokenized_test_text = dataset["test"].map(partial_tokenize_function_text, batched=True)
+        tokenized_train_context = dataset["train"].map(partial_tokenize_function_context, batched=True)
+        tokenized_test_context = dataset["test"].map(partial_tokenize_function_context, batched=True)
+
+        tokenized_train_text_dataset = TextDataset(tokenized_train_text)
+        tokenized_test_text_dataset = TextDataset(tokenized_test_text)
+        tokenized_train_context_dataset = TextDataset(tokenized_train_context)
+        tokenized_test_context_dataset = TextDataset(tokenized_test_context)
+        
+        tokenized_train_text_dataloader = DataLoader(tokenized_train_text_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_test_text_dataloader = DataLoader(tokenized_test_text_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_train_context_dataloader = DataLoader(tokenized_train_context_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_test_context_dataloader = DataLoader(tokenized_test_context_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+
+        self.logger.info(f"Evaluating the base model on textual dataset...")        
+        neptune_run = self.init_neptune_run("#6.1: base_model", description="evaluating the base model without fine-tuning", params=params)
+        base_model_eval_metrics = self.model.evaluate(tokenized_test_text_dataloader, device=device, neptune_run=neptune_run)
+        self.results["base_model_eval_metrics"] = base_model_eval_metrics
+        neptune_run.stop()
+        
+        # Log metrics
+        # self.results["base"] = {}
+        # for key, value in base_model_eval_metrics.items():
+        #     self.results["base"][key] = value
+        #     neptune_run[f"eval/{key}"].append(value)
+        # neptune_run.stop()
+
+        self.logger.info(f"training and evaluating the model on textual dataset...")
+        neptune_run = self.init_neptune_run(name="#6.2: base_text_model", description="base model fine-tuned and evaluated on textual data without temporal or market context", params=params)
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        text_trained_model = CryptoBERT()
+        train_metrics = text_trained_model.train(dataloader=tokenized_train_text_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        self.results["textual_fine_tuned_model"] = train_metrics
+        text_trained_model_eval_metrics = text_trained_model.evaluate(tokenized_test_text_dataloader, device=device, neptune_run=neptune_run)
+        self.results["textual_fine_tuned_model_eval_metrics"] = text_trained_model_eval_metrics
+        neptune_run.stop()
+
+        # self.logger.info(f"evaluating the finetuned model...")
+        # neptune_run = self.init_neptune_run("#1.3", description="evaluating the base model without fintuning", params=params)
+        # eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=device, neptune_run=neptune_run)
+        # self.results["eval"] = eval_metrics
+        # neptune_run.stop()
+        
+        self.logger.info(f"training and evaluating the model on context-aware dataset...")
+        neptune_run = self.init_neptune_run(name="#6.3: temporal_context_model", description="temporal context-aware model fine-tuned and evaluated on context-aware dataset with temporal or market context", params=params)
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        context_trained_model = CryptoBERT()
+        train_metrics = context_trained_model.train(dataloader=tokenized_train_context_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        self.results["temporal_context_fine_tuned_model"] = train_metrics
+        context_trained_model_eval_metrics = context_trained_model.evaluate(tokenized_test_context_dataloader, device=device, neptune_run=neptune_run)
+        self.results["temporal_context_fine_tuned_model_eval_metrics"] = context_trained_model_eval_metrics
+        neptune_run.stop()
+
+        self.end_time = datetime.datetime.now()
+        return self.results
+
+    def load_data(self) -> tuple:
+        """
+        returns text_df and price_df in raw format
+        """
+        text_df = pd.read_csv(self.text_df_addr, usecols=["date", "text_split"])
+        text_df.rename(columns={"text_split": "text"}, inplace=True)
+        text_df.set_index("date", inplace=True)
+        text_df.index = pd.to_datetime(text_df.index)
+
+        price_df = pd.read_csv(
+            self.price_df_addr,
+            usecols=["timestamp", "close", "open", "high", "low", "volume"],
+        )
+        price_df.set_index("timestamp", inplace=True)
+        price_df.index = pd.to_datetime(price_df.index, unit="s")
+
+        return text_df, price_df
+    
+    def extract_time_string(df):
+        """
+        Extract time string from date column to be used in the tweet
+        """
+        df['time'] = df.index.to_series().dt.strftime('%d,%b,%Y')
+        return df
+    
+    def prefix_text_column(df, time_col, trend_col, text_col):
+        """
+        Prefix a text column with temporal and market context.
+
+        Parameters:
+        df (DataFrame): The input DataFrame.
+        time_col (str): The name of the time column.
+        trend_col (str): The name of the trend column.
+        text_col (str): The name of the text column.
+
+        Returns:
+        DataFrame: The DataFrame with the prefixed text column.
+        """
+        # Create a new column by combining the time, trend, and text columns
+        df["context_aware"] = "time: " + df[time_col].astype(str) + " trend: " + df[trend_col].astype(str) + " text: " + df[text_col]
+
+        # Return the DataFrame
+        return df
+    
+    def select_equal_samples(df, n_samples):
+        """
+        Select equal numbers of tweets from each day in the dataset.
+
+        Parameters:
+        df (DataFrame): The input DataFrame.
+        n_samples (int): The number of samples to select from each day.
+
+        Returns:
+        DataFrame: The DataFrame with the selected samples.
+        """
+        # Get the unique dates
+        unique_dates = df.index.unique()
+
+        # Initialize an empty DataFrame to store the selected samples
+        selected_samples = pd.DataFrame()
+
+        # Iterate over each unique date
+        for date in unique_dates:
+            # Select n_samples from the current date
+            samples = df.loc[date].sample(n_samples, replace=True)
+
+            # Append the samples to the selected_samples DataFrame
+            selected_samples = pd.concat([selected_samples, samples])
+
+        # Return the selected_samples DataFrame
+        return selected_samples
+
+
 REGISTERED_EXPERIMENTS = [
     DirectionSplitTBL,
     DirectionSplitSentiment,
     DirectionCrossValidate,
     IntensitySplit,
     ScoreSplit,
+    TextualFeatureContextAware,
 ]
