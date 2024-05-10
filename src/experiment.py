@@ -486,6 +486,9 @@ class TextualFeatureContextAware(Experiment):
         labeled_texts = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
         labeled_texts.dropna(inplace=True)
 
+        # Convert labels to integers
+        labeled_texts["label"] = labeled_texts["label"].astype(int)  # Ensure labels are integers
+
         # Select equal numbers of tweets from each day in the dataset
         how_many_tweets_per_day = 100
         sampled_df = self.select_equal_samples(labeled_texts, how_many_tweets_per_day)
