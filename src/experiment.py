@@ -471,24 +471,9 @@ class TextualFeatureContextAware(Experiment):
         # loading and labeling the data
         self.logger.info(f"loading and labeling the data...")
         text_df, price_df = self.load_data()
-        
-        self.labeler.fit(price_df)
-        price_df = self.labeler.transform()
-        price_df["text_label"] = price_df.label.map({0: 'bearish', 1: 'neutral', 2: 'bullish'})
-        price_df["label"] = price_df.label.shift(-1)
-        price_df.dropna(inplace=True)
-        
-        text_df = self.extract_time_string(text_df)
-        
-        labeled_texts = text_df.merge(
-            price_df[["label", "text_label"]], left_index=True, right_index=True, how="left"
-        )
-        labeled_texts = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
-        labeled_texts.dropna(inplace=True)
 
-        # Convert labels to integers
-        labeled_texts["label"] = labeled_texts["label"].astype(int)  # Ensure labels are integers
-
+        labeled_texts = self.label_data(self.labeler, price_df, text_df)
+                
         # Select equal numbers of tweets from each day in the dataset
         how_many_tweets_per_day = 100
         sampled_df = self.select_equal_samples(labeled_texts, how_many_tweets_per_day)
@@ -505,12 +490,6 @@ class TextualFeatureContextAware(Experiment):
         # Spliting the dataset for evaluation
         dataset = dataset.train_test_split(0.2, shuffle=False)
 
-        # self.logger.info(f"changing the label type of the dataset...")
-        # labeled_texts = labeled_texts.shuffle()
-        # labeled_texts = labeled_texts.select(range(self.num_samples))
-        # labeled_texts = labeled_texts.class_encode_column('label')
-        # labeled_texts = labeled_texts.train_test_split(params["TRAIN_TEST_SPLIT"], seed=42)
-
         # tokenizing the dataset text to be used in train and test loops
         # Tokenize the text field in the dataset
         def tokenize_function(tokenizer, examples, text_col="text"):
@@ -519,9 +498,7 @@ class TextualFeatureContextAware(Experiment):
             return {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"], "label": examples["label"]}
 
         tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
-        # labeled_texts = HFDataset.tokenize(
-        #     tokenizer, labeled_texts
-        # )
+        
         partial_tokenize_function_text = partial(tokenize_function, tokenizer, text_col="text")
         partial_tokenize_function_context = partial(tokenize_function, tokenizer, text_col="context_aware")
         
@@ -547,13 +524,6 @@ class TextualFeatureContextAware(Experiment):
         self.results["base_model_eval_metrics"] = base_model_eval_metrics
         neptune_run.stop()
         
-        # Log metrics
-        # self.results["base"] = {}
-        # for key, value in base_model_eval_metrics.items():
-        #     self.results["base"][key] = value
-        #     neptune_run[f"eval/{key}"].append(value)
-        # neptune_run.stop()
-
         self.logger.info(f"Training and evaluating the model on textual dataset...")
         neptune_run = self.init_neptune_run(name="#6.2: base_text_model", description="base model fine-tuned and evaluated on textual data without temporal or market context", params=params)
         
@@ -564,12 +534,6 @@ class TextualFeatureContextAware(Experiment):
         self.results["textual_fine_tuned_model_eval_metrics"] = text_trained_model_eval_metrics
         neptune_run.stop()
 
-        # self.logger.info(f"evaluating the finetuned model...")
-        # neptune_run = self.init_neptune_run("#1.3", description="evaluating the base model without fintuning", params=params)
-        # eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=self.device, neptune_run=neptune_run)
-        # self.results["eval"] = eval_metrics
-        # neptune_run.stop()
-        
         self.logger.info(f"training and evaluating the model on context-aware dataset...")
         neptune_run = self.init_neptune_run(name="#6.3: temporal_context_model", description="temporal context-aware model fine-tuned and evaluated on context-aware dataset with temporal or market context", params=params)
 
@@ -600,6 +564,27 @@ class TextualFeatureContextAware(Experiment):
         price_df.index = pd.to_datetime(price_df.index, unit="s")
 
         return text_df, price_df
+    
+    def label_data(self, labeler, price_df, text_df):
+        labeler.fit(price_df)
+        price_df = labeler.transform()
+        price_df["text_label"] = price_df.label.map({0: 'bearish', 1: 'neutral', 2: 'bullish'})
+        price_df["label"] = price_df.label.shift(-1)
+        price_df.dropna(inplace=True)
+        
+        text_df = self.extract_time_string(text_df)
+        
+        labeled_texts = text_df.merge(
+            price_df[["label", "text_label"]], left_index=True, right_index=True, how="left"
+        )
+        labeled_texts = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text')
+        labeled_texts.dropna(inplace=True)
+
+        # Convert labels to integers
+        labeled_texts["label"] = labeled_texts["label"].astype(int)  # Ensure labels are integers
+        
+        return labeled_texts
+
     
     def extract_time_string(self, df):
         """
