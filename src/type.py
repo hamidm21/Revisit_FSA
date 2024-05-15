@@ -1,5 +1,6 @@
 from logging import Logger
 import neptune
+import pandas as pd
 
 class Experiment:
     def __init__(self, id: int, description: str, base_addr: str, logger: Logger=None, data_addr: str=None, model: any=None):
@@ -71,6 +72,60 @@ class Experiment:
 
     def __str__(self):
         return self.description
+    
+    def extract_time_string(self, df):
+        """
+        Extract time string from date column to be used in the tweet
+        """
+        df['time'] = df.index.to_series().dt.strftime('%d,%b,%Y')
+        return df
+    
+    def prefix_text_column(self, df, time_col, trend_col, text_col):
+        """
+        Prefix a text column with temporal and market context.
+
+        Parameters:
+        df (DataFrame): The input DataFrame.
+        time_col (str): The name of the time column.
+        trend_col (str): The name of the trend column.
+        text_col (str): The name of the text column.
+
+        Returns:
+        DataFrame: The DataFrame with the prefixed text column.
+        """
+        # Create a new column by combining the time, trend, and text columns
+        df["context_aware"] = "time: " + df[time_col].astype(str) + " trend: " + df[trend_col].astype(str) + " text: " + df[text_col]
+
+        # Return the DataFrame
+        return df
+    
+    def select_equal_samples(self, df, n_samples):
+        """
+        Select equal numbers of tweets from each day in the dataset.
+
+        Parameters:
+        df (DataFrame): The input DataFrame.
+        n_samples (int): The number of samples to select from each day.
+
+        Returns:
+        DataFrame: The DataFrame with the selected samples.
+        """
+        # Get the unique dates
+        unique_dates = df.index.unique()
+
+        # Initialize an empty DataFrame to store the selected samples
+        selected_samples = pd.DataFrame()
+
+        # Iterate over each unique date
+        for date in unique_dates:
+            # Select n_samples from the current date
+            samples = df.loc[date].sample(n_samples, replace=True)
+
+            # Append the samples to the selected_samples DataFrame
+            selected_samples = pd.concat([selected_samples, samples])
+
+        # Return the selected_samples DataFrame
+        return selected_samples
 
 class Labeler:
     def __init__(self, name):
