@@ -426,7 +426,6 @@ class ScoreSplit(Experiment):
             """
         )
 
-
 class TextualFeatureContextAware(Experiment):
     def __init__(
         self,
@@ -584,7 +583,6 @@ class TextualFeatureContextAware(Experiment):
         labeled_texts["label"] = labeled_texts["label"].astype(int)  # Ensure labels are integers
         
         return labeled_texts
-
 
 class ContextFeatureContextAware(Experiment):
     def __init__(
@@ -745,6 +743,163 @@ class ContextFeatureContextAware(Experiment):
         
         return labeled_texts
 
+class TemporalVsNonTemporal(Experiment):
+    def __init__(
+        self,
+        num_samples=1000,
+        price_df_addr="raw/daily-2020.csv",
+        text_df_addr="raw/combined_tweets_2020_labeled.csv",
+        logger=None
+    ):
+        super().__init__(
+            id=8,
+            base_addr=base_addr,
+            model=CryptoBERT(),
+            logger=logger,
+            description="""
+                comparing fine-tuned model on non-temporal context-aware dataset with fine-tuned model on temporal context-aware.
+                """,
+        )
+
+        self.price_df_addr = price_df_addr
+        self.text_df_addr = text_df_addr
+        self.num_samples = num_samples
+        # hard code essentials
+        self.labeler = TripleBarrierLabeler()
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.results = {}
+
+    def run(self):
+        # constants
+        params = {
+            "samples": self.num_samples,
+            "BATCH_SIZE":10,
+            "SEED":42,
+            "TRAIN_TEST_SPLIT":0.2,
+            "TRAINING_BATCH_SIZE":5,
+            "EPOCHS":10,
+            "LEARNING_RATE":1e-5,
+        }
+
+        self.start_time = datetime.datetime.now()
+        self.logger.info(f"tarted experiment at {self.start_time}")
+        self.logger.info(f"The device is {self.device}")
+
+        # loading and labeling the data
+        self.logger.info(f"loading and labeling the data...")
+        text_df, price_df = self.load_data()
+
+        non_temporal_labeled_texts = self.label_data(self.labeler, price_df, text_df, is_temporal=False)
+        temporal_labeled_texts = self.label_data(self.labeler, price_df, text_df, is_temporal=True)
+                
+        # Select equal numbers of tweets from each day in the dataset
+        how_many_tweets_per_day = 100
+        non_temporal_sampled_df = self.select_equal_samples(non_temporal_labeled_texts, how_many_tweets_per_day)
+        temporal_sampled_df = self.select_equal_samples(temporal_labeled_texts, how_many_tweets_per_day)
+        
+        # creating a huggingface dataset for base model evaluation
+        self.logger.info(f"creating and tokenizing the dataset...")
+        non_temporal_dataset = Dataset.from_pandas(non_temporal_sampled_df[['text', 'context_aware', 'label']])        
+        temporal_dataset = Dataset.from_pandas(temporal_sampled_df[['text', 'context_aware', 'label']])        
+        
+        # preprocess the text column
+        self.logger.info(f"preprocessing the dataset...")
+        # non_temporal_dataset = HFDataset.preprocess(non_temporal_dataset)
+        # temporal_dataset = HFDataset.preprocess(temporal_dataset)
+        
+
+        self.logger.info(f"slicing and spliting the dataset...")
+        # Spliting the dataset for evaluation
+        non_temporal_dataset = non_temporal_dataset.train_test_split(0.2, shuffle=False)
+        temporal_dataset = temporal_dataset.train_test_split(0.2, shuffle=False)
+
+        # tokenizing the dataset text to be used in train and test loops
+        # Tokenize the text field in the dataset
+        def tokenize_function(tokenizer, examples, text_col="text"):
+            # Tokenize the text and return only the necessary fields
+            encoded = tokenizer(examples[text_col], padding='max_length', max_length=512)
+            return {"input_ids": encoded["input_ids"], "attention_mask": encoded["attention_mask"], "label": examples["label"]}
+
+        tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
+        
+        partial_tokenize_function_context = partial(tokenize_function, tokenizer, text_col="context_aware")
+        
+        # Tokenizing
+        tokenized_train_non_temporal = non_temporal_dataset["train"].map(partial_tokenize_function_context, batched=True)
+        tokenized_test_non_temporal = non_temporal_dataset["test"].map(partial_tokenize_function_context, batched=True)
+        tokenized_train_temporal = temporal_dataset["train"].map(partial_tokenize_function_context, batched=True)
+        tokenized_test_temporal = temporal_dataset["test"].map(partial_tokenize_function_context, batched=True)
+
+        tokenized_train_non_temporal_dataset = TextDataset(tokenized_train_non_temporal)
+        tokenized_test_non_temporal_dataset = TextDataset(tokenized_test_non_temporal)
+        tokenized_train_temporal_dataset = TextDataset(tokenized_train_temporal)
+        tokenized_test_temporal_dataset = TextDataset(tokenized_test_temporal)
+        
+        tokenized_train_non_temporal_dataloader = DataLoader(tokenized_train_non_temporal_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_test_non_temporal_dataloader = DataLoader(tokenized_test_non_temporal_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_train_temporal_dataloader = DataLoader(tokenized_train_temporal_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        tokenized_test_temporal_dataloader = DataLoader(tokenized_test_temporal_dataset, batch_size=params['BATCH_SIZE'], shuffle=False)
+        
+        self.logger.info(f"Training and evaluating the model on NON-temporal context-aware dataset...")
+        neptune_run = self.init_neptune_run(name="#6.2: non_temporal_model", description="base model fine-tuned on non-temporal and evaluated on non-temporal test data", params=params)
+        
+        non_temporal_trained_model = CryptoBERT()
+        train_metrics = non_temporal_trained_model.train(dataloader=tokenized_train_non_temporal_dataloader, device=self.device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        self.results["non_temporal_fine_tuned_model"] = train_metrics
+        non_temporal_trained_model_eval_metrics = non_temporal_trained_model.evaluate(tokenized_test_non_temporal_dataloader, device=self.device, neptune_run=neptune_run)
+        self.results["non_temporal_fine_tuned_model_eval_metrics"] = non_temporal_trained_model_eval_metrics
+        neptune_run.stop()
+
+        self.logger.info(f"Training and evaluating the model on temporal context-aware dataset...")
+        neptune_run = self.init_neptune_run(name="#6.3: temporal_context_model", description="temporal context-aware model fine-tuned and evaluated on context-aware dataset with temporal or market context", params=params)
+
+        temporal_trained_model = CryptoBERT()
+        train_metrics = temporal_trained_model.train(dataloader=tokenized_train_temporal_dataloader, device=self.device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
+        self.results["temporal_context_fine_tuned_model"] = train_metrics
+        temporal_trained_model_eval_metrics = temporal_trained_model.evaluate(tokenized_test_temporal_dataloader, device=self.device, neptune_run=neptune_run)
+        self.results["temporal_context_fine_tuned_model_eval_metrics"] = temporal_trained_model_eval_metrics
+        neptune_run.stop()
+
+        self.end_time = datetime.datetime.now()
+        return self.results
+
+    def load_data(self) -> tuple:
+        """
+        returns text_df and price_df in raw format
+        """
+        text_df = pd.read_csv(self.text_df_addr, usecols=["date", "text_split"])
+        text_df.rename(columns={"text_split": "text"}, inplace=True)
+        text_df.set_index("date", inplace=True)
+        text_df.index = pd.to_datetime(text_df.index)
+
+        price_df = pd.read_csv(
+            self.price_df_addr,
+            usecols=["timestamp", "close", "open", "high", "low", "volume"],
+        )
+        price_df.set_index("timestamp", inplace=True)
+        price_df.index = pd.to_datetime(price_df.index, unit="s")
+
+        return text_df, price_df
+    
+    def label_data(self, labeler, price_df, text_df, is_temporal=True):
+        labeler.fit(price_df)
+        price_df = labeler.transform()
+        price_df["text_label"] = price_df.label.map({0: 'bearish', 1: 'neutral', 2: 'bullish'})
+        price_df["label"] = price_df.label.shift(-1)
+        price_df.dropna(inplace=True)
+        
+        text_df = self.extract_time_string(text_df)
+        
+        labeled_texts = text_df.merge(
+            price_df[["label", "text_label"]], left_index=True, right_index=True, how="left"
+        )
+        labeled_texts = self.prefix_text_column(labeled_texts, 'time', 'text_label', 'text', is_temporal=is_temporal)
+        labeled_texts.dropna(inplace=True)
+
+        # Convert labels to integers
+        labeled_texts["label"] = labeled_texts["label"].astype(int)  # Ensure labels are integers
+        
+        return labeled_texts
 
 
 REGISTERED_EXPERIMENTS = [
@@ -754,5 +909,6 @@ REGISTERED_EXPERIMENTS = [
     IntensitySplit,
     ScoreSplit,
     TextualFeatureContextAware,
-    ContextFeatureContextAware
+    ContextFeatureContextAware,
+    TemporalVsNonTemporal,
 ]
