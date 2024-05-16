@@ -80,7 +80,7 @@ class Experiment:
         df['time'] = df.index.to_series().dt.strftime('%d,%b,%Y')
         return df
     
-    def prefix_text_column(self, df, time_col, trend_col, text_col):
+    def prefix_text_column(self, df, time_col, trend_col, text_col, is_temporal=True):
         """
         Prefix a text column with temporal and market context.
 
@@ -93,9 +93,12 @@ class Experiment:
         Returns:
         DataFrame: The DataFrame with the prefixed text column.
         """
-        # Create a new column by combining the time, trend, and text columns
-        df["context_aware"] = "time: " + df[time_col].astype(str) + " trend: " + df[trend_col].astype(str) + " text: " + df[text_col]
-
+        # # Create a new column by combining the time, trend, and text columns if is_temporal is True, and if is_temporal is False, combine the trend and text columns
+        if is_temporal:
+            df["context_aware"] = "time: " + df[time_col].astype(str) + " trend: " + df[trend_col].astype(str) + " text: " + df[text_col]
+        else:
+            df["context_aware"] = " trend: " + df[trend_col].astype(str) + " text: " + df[text_col]
+            
         # Return the DataFrame
         return df
     
