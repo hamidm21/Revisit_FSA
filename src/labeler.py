@@ -1,46 +1,144 @@
 import numpy as np
+import pandas as pd
 
 from type import Labeler
 from util.decorator import validate_columns
 
 class TripleBarrierLabeler(Labeler):
-    def __init__(self, volatility_period=7, vertical_barrier_timedelta=2, upper_barrier_factor=1, lower_barrier_factor=1):
+    def __init__(self, volatility_period=7, upper_barrier_factor=1, lower_barrier_factor=1, vertical_barrier=7, min_trend_days=2, barrier_type='volatility', touch_type="HL", up_label=2, neutral_label=1, down_label=0):
         """
         Initialize the labeler.
         """
-        super().__init__(name="triple barrier lableing")
+        super().__init__(name="triple barrier labeling")
         self.volatility_period = volatility_period
         self.upper_barrier_factor = upper_barrier_factor
         self.lower_barrier_factor = lower_barrier_factor
-        self.vertical_barrier_timedelta = vertical_barrier_timedelta
+        self.vertical_barrier = vertical_barrier
+        self.min_trend_days = min_trend_days
+        self.barrier_type = barrier_type
+        self.touch_type = touch_type
+        self.up_label = up_label
+        self.down_label = down_label
+        self.neutral_label = neutral_label
 
-    @validate_columns(['low', 'close', 'high'])
-    def fit(self, data):
-        """
-        Fit the labeler to the data.
+    def calculate_barriers(self, df, i, window):
+        """calculate the barriers based on either volatility or returns of the backward window
 
         Args:
-        data (pd.DataFrame): The data to fit the labeler to.
-        """
-        self.data = data.copy()
-        # Define your barriers
-        self.data['upper_barrier'] = self.data['close'] + self.data['close'].rolling(self.volatility_period).std() * self.upper_barrier_factor
-        self.data['lower_barrier'] = self.data['close'] - self.data['close'].rolling(self.volatility_period).std() * self.lower_barrier_factor
-        self.data['vertical_barrier'] = self.data.index.shift(self.vertical_barrier_timedelta, freq='T')
+            df (pd.DataFrame): Data
+            i (pd.index): the index of the beginning of the window
+            window (int): window size
 
-    def transform(self, up_label = 2, down_label = 0, neutral_label = 1):
+        Returns:
+            df: Data including barriers for the forward window
+        """
+        end_window = min(i+window, len(df)-1)  # Ensure the window does not exceed the dataframe
+
+        # Calculate the mean volatility or daily returns over the volatility_period
+        if self.barrier_type == 'volatility':
+            current_value = df.loc[i, 'volatility']
+        elif self.barrier_type == 'returns':
+            current_value = df.loc[i, 'daily_returns']
+        else:
+            raise ValueError("Invalid barrier_type. Choose either 'volatility' or 'returns'")
+
+        df.loc[i:end_window, 'upper_barrier'] = df.loc[i, 'close'] + (df.loc[i, 'close'] * current_value * self.upper_barrier_factor)
+        df.loc[i:end_window, 'lower_barrier'] = df.loc[i, 'close'] - (df.loc[i, 'close'] * current_value * self.lower_barrier_factor)
+        return df
+
+    def label_observations(self, df, origin, i, label):
+        df.loc[origin:i+1, 'label'] = label
+        return df
+
+    def get_daily_vol(self, close, span0=100):
+        """
+        Calculate the daily volatility of closing prices.
+        
+        Parameters:
+        - close: A pandas Series of closing prices.
+        - span0: The span for the EWM standard deviation.
+        
+        Returns:
+        - A pandas Series of daily volatility estimates.
+        """
+        # Find the start of the previous day for each day
+        prev_day_start = close.index.searchsorted(close.index - pd.Timedelta(days=1))
+        prev_day_start = prev_day_start[prev_day_start > 0]
+        
+        # Create a series with the start of the previous day for each day
+        prev_day_start = pd.Series(close.index[prev_day_start - 1], index=close.index[close.shape[0] - prev_day_start.shape[0]:])
+        
+        # Calculate daily returns
+        daily_returns = close.loc[prev_day_start.index] / close.loc[prev_day_start.values].values - 1
+        
+        # Calculate EWM standard deviation of daily returns
+        daily_vol = daily_returns.ewm(span=span0).std()
+        
+        return daily_returns, daily_vol
+
+    def fit(self, sdf):
+        df = sdf.copy()
+        # Calculate daily returns and volatility
+        df['daily_returns'], df['volatility'] = self.get_daily_vol(df.close, self.volatility_period)
+
+        df = df.reset_index()
+        # Initialize label and window start
+        df['label'] = self.neutral_label
+        df['window_start'] = False
+
+        self.data = df
+
+    def transform(self):
         """
         Transform the data into labels.
 
         Returns:
         pd.DataFrame: The labels.
         """
-        # Label the observations
-        self.data['label'] = np.where(self.data['high'].shift(-1) > self.data['upper_barrier'], up_label,
-                                      np.where(self.data['low'].shift(-1) < self.data['lower_barrier'], neutral_label, down_label))
+        window = self.vertical_barrier
+        origin = 0
+        touch_upper = lambda high, barrier: high >= barrier
+        touch_lower = lambda low, barrier: low <= barrier
+        # For each observation
+        for i in range(0, len(self.data)):
+            # Define your barriers at the beginning of each window
+            if i == origin:
+                self.data = self.calculate_barriers(self.data, i, window)
+                self.data.loc[i, 'window_start'] = True  # Mark the start of the window
 
+            # one of the conditions were met
+            if touch_upper(self.data.loc[i, "high" if self.touch_type == 'HL' else 'close'], self.data.loc[i, "upper_barrier"]):
+                if (i - origin > self.min_trend_days):
+                    # label the observations
+                    self.data = self.label_observations(self.data, origin, i, self.up_label)
+                    # set new origin
+                    origin = i + 1 if i + 1 < len(self.data) else i  # Check if i + 1 is within the DataFrame's index
+                    # reset window
+                    window = self.vertical_barrier
+            elif touch_lower(self.data.loc[i, "low" if self.touch_type == 'HL' else 'close'], self.data.loc[i, "lower_barrier"]):
+                if (i - origin > self.min_trend_days):
+                    # label the observations
+                    self.data = self.label_observations(self.data, origin, i, self.down_label)
+                    # set new origin
+                    origin = i + 1 if i + 1 < len(self.data) else i  # Check if i + 1 is within the DataFrame's index
+                    # reset window
+                    window = self.vertical_barrier
+
+            # none of the conditions were met
+            else:
+                if window > 0:
+                    # reduce window size by one
+                    window = window - 1
+                else:
+                    # reset window
+                    window = self.vertical_barrier
+                    # label neutral from origin to origin + window
+                    self.data.loc[origin:min(origin+window, len(self.data)-1), 'label'] = self.neutral_label  # Ensure the window does not exceed the dataframe
+                    # set origin to the next id
+                    origin = i + 1 if i + 1 < len(self.data) else i  # Check if i + 1 is within the DataFrame's index
+
+        self.data = self.data.set_index("timestamp")
         return self.data
-
 
 class TrueRangeLabeler(Labeler):
     def __init__(self, data):

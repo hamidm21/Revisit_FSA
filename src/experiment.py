@@ -60,7 +60,7 @@ class DirectionSplitTBL(Experiment):
         self.text_df_addr = text_df_addr
         self.num_samples = num_samples
         # hard code essentials
-        self.labeler = TripleBarrierLabeler()
+        self.labeler = TripleBarrierLabeler(volatility_period=10, upper_barrier_factor=1.5, lower_barrier_factor=1.2, vertical_barrier=7, min_trend_days=2, barrier_type='volatility')
 
         self.results = {}
 
@@ -80,7 +80,9 @@ class DirectionSplitTBL(Experiment):
 
         # loading and labeling the data
         self.logger.info(f"loading and labeling the data...")
-        text_df, price_df = self.load_data()
+        text_df = self.load_textaul_data()
+        price_df = self.load_price_data()
+
         self.labeler.fit(price_df)
         triple_barrier_labels = self.labeler.transform()
         triple_barrier_labels["label"] = triple_barrier_labels["label"].shift(-1)
@@ -146,7 +148,7 @@ class DirectionSplitTBL(Experiment):
         self.end_time = datetime.datetime.now()
         return self.results
 
-    def load_data(self) -> tuple:
+    def load_textual_data(self) -> pd.DataFrame:
         """
         returns text_df and price_df in raw format
         """
@@ -155,6 +157,9 @@ class DirectionSplitTBL(Experiment):
         text_df.set_index("date", inplace=True)
         text_df.index = pd.to_datetime(text_df.index)
 
+        return text_df
+
+    def load_price_data(self) -> pd.DataFrame:
         price_df = pd.read_csv(
             self.price_df_addr,
             usecols=["timestamp", "close", "open", "high", "low", "volume"],
@@ -162,7 +167,7 @@ class DirectionSplitTBL(Experiment):
         price_df.set_index("timestamp", inplace=True)
         price_df.index = pd.to_datetime(price_df.index, unit="s")
 
-        return text_df, price_df
+        return price_df
 
 class DirectionSplitSentiment(Experiment):
     def __init__(
