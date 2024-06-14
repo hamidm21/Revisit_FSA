@@ -94,7 +94,7 @@ class SentimentLabelingExperiment(Experiment):
 class DirectionSplitTBL(Experiment):
     def __init__(
         self,
-        num_samples=100,
+        num_samples=60000,
         price_df_addr="raw/bitcoin_2015-01-01_2022-01-01.csv",
         text_df_addr="raw/combined_2015_to_2021.csv",
         logger=None
@@ -152,16 +152,17 @@ class DirectionSplitTBL(Experiment):
         labeled_texts = HFDataset.from_pandas(labeled_texts[["text", "label"]])
         # preprocess the text column
         self.logger.info(f"preprocessing the dataset...")
-        labeled_texts = HFDataset.preprocess(labeled_texts)
+        #labeled_texts = HFDataset.preprocess(labeled_texts)
 
         self.logger.info(f"slicing and spliting the dataset...")
         # Spliting the dataset for evaluation
 
         self.logger.info(f"changing the label type of the dataset...")
         labeled_texts = labeled_texts.shuffle()
-        labeled_texts = labeled_texts.select(range(self.num_samples))
+        #labeled_texts = labeled_texts.select(range(self.num_samples))
         labeled_texts = labeled_texts.class_encode_column('label')
         labeled_texts = labeled_texts.train_test_split(params["TRAIN_TEST_SPLIT"], seed=42)
+        self.logger.info(labeled_texts)
 
         # tokenizing the dataset text to be used in train and test loops
         tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
@@ -169,6 +170,7 @@ class DirectionSplitTBL(Experiment):
             tokenizer, labeled_texts
         )
 
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
         trainer = self.model.get_trainer(labeled_texts["test"], neptune_run=neptune_run)
         self.logger.info(f"evaluating the base model without fintuning...")
@@ -190,7 +192,6 @@ class DirectionSplitTBL(Experiment):
 
         self.logger.info(f"training the model...")
         neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         train_metrics = self.model.train(dataloader=train_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
         self.results["train"] = train_metrics
         neptune_run.stop()

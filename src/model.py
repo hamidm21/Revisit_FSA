@@ -291,6 +291,6 @@ class CryptoBERT(Model):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,        # test dataset
             compute_metrics=compute_metrics_func,   # the compute_metrics function
-        )
+            )
 
         return trainer
