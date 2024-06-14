@@ -41,10 +41,6 @@ class HFDataset(HuggingfaceDataset):
                 else:
                     return {"text" : text_list, "emojis" : emojis_list, "hashtags" : hashtags_list}
 
-
-
-
-
         preprocessed_data =  self.map(run_all_preprocess_functions, batched = True)
         return preprocessed_data
         # self.tokenizer = tokenizer

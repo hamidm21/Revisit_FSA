@@ -1,6 +1,7 @@
 import datetime
 from datetime import timedelta
 
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 from transformers import (
@@ -38,12 +39,64 @@ load_dotenv()
 base_addr = os.getenv("BASE_ADDRESS")
 
 
+class SentimentLabelingExperiment(Experiment):
+    def __init__(self, logger=None, data_addr='./raw/combined_2015_to_2021.csv'):
+        super().__init__(
+        id=0,
+        description="labeling textual data based on the base sentiment model",
+        logger=logger,
+        base_addr=base_addr,
+        model=CryptoBERT())
+        self.text_df_addr = data_addr  # Assuming data_addr is the address to the textual data
+        self.tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
+
+    def run(self):
+        self.start_time = datetime.datetime.now()
+        self.logger.info(f"started experiment at {self.start_time}")
+
+        # Load the textual data
+        text_df = self.load_textual_data()
+        text_df = text_df[0:10]
+
+        # Initialize an empty list to store the sentiment labels
+        sentiment_labels = []
+
+        # Iterate over the tokenized inputs
+        self.logger.info(f"labeling...")
+        for tweet in tqdm(text_df['text']):
+            inputs = self.tokenizer(tweet, return_tensors='pt', padding=True, truncation=True)
+            # Get the model's prediction
+            with torch.no_grad():
+                outputs = self.model.model(**inputs)
+
+            # Get the predicted class (sentiment label)
+            _, predicted_class = torch.max(outputs.logits, dim=1)
+            sentiment_labels.append(predicted_class.item())
+
+        # Add the sentiment labels as a new column in the DataFrame
+        text_df['sentiment_label'] = sentiment_labels
+
+        # Save the DataFrame with the sentiment labels
+        text_df.to_csv(f'./raw/labeled_tweets.csv')
+
+        self.logger.info('Sentiment labeling completed and results saved.')
+
+        self.end_time = datetime.datetime.now()
+        return self.results
+
+    def load_textual_data(self) -> pd.DataFrame:
+        text_df = pd.read_csv(self.text_df_addr, usecols=["date", "text_split"])
+        text_df.rename(columns={"text_split": "text"}, inplace=True)
+        text_df.set_index("date", inplace=True)
+        text_df.index = pd.to_datetime(text_df.index)
+        return text_df
+
 class DirectionSplitTBL(Experiment):
     def __init__(
         self,
-        num_samples=60000,
-        price_df_addr="raw/daily-2020.csv",
-        text_df_addr="raw/combined_tweets_2020_labeled.csv",
+        num_samples=100,
+        price_df_addr="raw/bitcoin_2015-01-01_2022-01-01.csv",
+        text_df_addr="raw/combined_2015_to_2021.csv",
         logger=None
     ):
         super().__init__(
@@ -80,7 +133,7 @@ class DirectionSplitTBL(Experiment):
 
         # loading and labeling the data
         self.logger.info(f"loading and labeling the data...")
-        text_df = self.load_textaul_data()
+        text_df = self.load_textual_data()
         price_df = self.load_price_data()
 
         self.labeler.fit(price_df)
@@ -90,6 +143,9 @@ class DirectionSplitTBL(Experiment):
             triple_barrier_labels[["label"]], left_index=True, right_index=True, how="left"
         )
         labeled_texts.dropna(inplace=True)
+
+        # undersample labels
+        labeled_texts = self.undersample_tweets(labeled_texts)
 
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
@@ -165,9 +221,33 @@ class DirectionSplitTBL(Experiment):
             usecols=["timestamp", "close", "open", "high", "low", "volume"],
         )
         price_df.set_index("timestamp", inplace=True)
-        price_df.index = pd.to_datetime(price_df.index, unit="s")
+        price_df.index = pd.to_datetime(price_df.index)
 
         return price_df
+
+    @staticmethod
+    def undersample_tweets(df):
+        # Count the number of tweets for each trend
+        trend_counts = df['label'].value_counts()
+        
+        # Identify the minority class
+        minority_class = trend_counts.idxmin()
+        minority_count = trend_counts.min()
+        
+        # Initialize an empty DataFrame to store the undersampled data
+        undersampled_df = pd.DataFrame()
+        
+        # Iterate over the trends
+        for trend in df['label'].unique():
+            # If this is the minority class, add all tweets to the undersampled data
+            if trend == minority_class:
+                undersampled_df = pd.concat([undersampled_df, df[df['label'] == trend]])
+            else:
+                # Otherwise, randomly select a subset of tweets equal to the minority count
+                subset = df[df['label'] == trend].sample(minority_count)
+                undersampled_df = pd.concat([undersampled_df, subset])
+        
+        return undersampled_df
 
 class DirectionSplitSentiment(Experiment):
     def __init__(
@@ -908,6 +988,7 @@ class TemporalVsNonTemporal(Experiment):
 
 
 REGISTERED_EXPERIMENTS = [
+    SentimentLabelingExperiment,
     DirectionSplitTBL,
     DirectionSplitSentiment,
     DirectionCrossValidate,

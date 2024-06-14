@@ -19,7 +19,7 @@ def runner(args):
     if id in EXPERIMENTS:
         # create logger
         logger = logging.getLogger('experiments logger')
-        logger.info("The intended experiment was found...")
+        logger.info(f"experiment {id} found...")
         exp = EXPERIMENTS.get(id)(logger=logger)
         exp.run()
         logger.info("generating report...")

@@ -1,4 +1,4 @@
-from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments, AdamW
+from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments
 from transformers.integrations import NeptuneCallback
 from scipy.special import softmax
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
@@ -6,7 +6,7 @@ from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squar
 import torch
 import torch.nn as nn
 from typing import Optional
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 from type import Model
@@ -56,7 +56,7 @@ class CryptoBERT(Model):
         # Move the model to the device
         self.model.to(device)
         # Set up the optimizer
-        optimizer = AdamW(self.model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
         for epoch in tqdm(range(epochs)):  # Number of epochs
             all_labels = []
             all_preds = []
@@ -168,7 +168,6 @@ class CryptoBERT(Model):
 
     @staticmethod
     def compute_metrics_classification(labels, preds, probs, neptune_run=None):
-        print(labels, preds)
         """
         Compute classification metrics based on the model's predictions and the true labels.
 
@@ -184,17 +183,15 @@ class CryptoBERT(Model):
         acc = accuracy_score(labels, preds)
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
-
-        # Plot confusion matrix
-        disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
-        fig, ax = plt.subplots(figsize=(10, 10))
-        disp.plot(ax=ax, cmap='Blues', values_format='d')
-        plt.title('Confusion Matrix')
-        # Save the confusion matrix to a file
-        plt.savefig("./result/exp1/finetuned_training_confusion_matrix.png")
         # Log the confusion matrix image to Neptune
         if neptune_run:
-            neptune_run["confusion_matrix"].upload("./result/exp1/finetuned_training_confusion_matrix.png")
+            # Plot confusion matrix
+            disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
+            fig, ax = plt.subplots(figsize=(10, 10))
+            disp.plot(ax=ax, cmap='Blues', values_format='d')
+            plt.title('Confusion Matrix')
+            plt.savefig("./finetuned_training_confusion_matrix.png")
+            neptune_run["confusion_matrix"].upload("./finetuned_training_confusion_matrix.png")
 
         # Create a dictionary of metrics
         metrics = {
@@ -231,7 +228,6 @@ class CryptoBERT(Model):
 
 
     def get_trainer(self, eval_dataset, neptune_run: Optional[object] = None, train_dataset=None):
-        print(f'the input task: {self.input_task}')
 
         def compute_metrics_regression(pred):
             labels = pred.label_ids
