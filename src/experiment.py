@@ -135,7 +135,6 @@ class DirectionSplitTBL(Experiment):
         self.logger.info(f"loading and labeling the data...")
         text_df = self.load_textual_data()
         price_df = self.load_price_data()
-
         self.labeler.fit(price_df)
         triple_barrier_labels = self.labeler.transform()
         triple_barrier_labels["label"] = triple_barrier_labels["label"].shift(-1)
@@ -171,7 +170,7 @@ class DirectionSplitTBL(Experiment):
         )
 
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        neptune_run = self.init2_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
+        neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
         trainer = self.model.get_trainer(labeled_texts["test"], neptune_run=neptune_run)
         self.logger.info(f"evaluating the base model without fintuning...")
         non_fine_tuned_eval_result = trainer.evaluate()
@@ -223,7 +222,7 @@ class DirectionSplitTBL(Experiment):
             usecols=["timestamp", "close", "open", "high", "low", "volume"],
         )
         price_df.set_index("timestamp", inplace=True)
-        price_df.index = pd.to_datetime(price_df.index)
+        price_df.index = pd.to_datetime(price_df.index, unit='s')
 
         return price_df
 
