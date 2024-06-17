@@ -171,7 +171,7 @@ class DirectionSplitTBL(Experiment):
         )
 
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
+        neptune_run = self.init2_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
         trainer = self.model.get_trainer(labeled_texts["test"], neptune_run=neptune_run)
         self.logger.info(f"evaluating the base model without fintuning...")
         non_fine_tuned_eval_result = trainer.evaluate()
