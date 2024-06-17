@@ -111,6 +111,9 @@ class CryptoBERT(Model):
 
     def predict(self, data):
         raise NotImplementedError("Subclasses must implement this method.")
+    
+    def save_model(self, path):
+        torch.save(self.model.state_dict(), path)
 
     def evaluate(self, dataloader, device, neptune_run=None):
         """

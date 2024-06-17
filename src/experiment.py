@@ -194,6 +194,7 @@ class DirectionSplitTBL(Experiment):
         neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
         train_metrics = self.model.train(dataloader=train_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
         self.results["train"] = train_metrics
+        self.model.save_model("./trained.pth")
         neptune_run.stop()
 
         self.logger.info(f"evaluating the finetuned model...")
