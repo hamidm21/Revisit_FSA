@@ -56,7 +56,7 @@ class SentimentLabelingExperiment(Experiment):
 
         # Load the textual data
         text_df = self.load_textual_data()
-        text_df = text_df[0:10]
+        text_df = text_df
 
         # Initialize an empty list to store the sentiment labels
         sentiment_labels = []
@@ -95,8 +95,8 @@ class DirectionSplitTBL(Experiment):
     def __init__(
         self,
         num_samples=60000,
-        price_df_addr="raw/bitcoin_2015-01-01_2022-01-01.csv",
-        text_df_addr="raw/combined_2015_to_2021.csv",
+        price_df_addr="raw/daily-2020.csv",
+        text_df_addr="raw/combined_tweets_2020_labeled.csv",
         logger=None
     ):
         super().__init__(
@@ -124,7 +124,7 @@ class DirectionSplitTBL(Experiment):
             "SEED":42,
             "TRAIN_TEST_SPLIT":0.2,
             "TRAINING_BATCH_SIZE":5,
-            "EPOCHS":2,
+            "EPOCHS":5,
             "LEARNING_RATE":1e-5,
         }
 
