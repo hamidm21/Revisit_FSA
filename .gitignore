@@ -174,3 +174,5 @@ mlruns
 artifacts/*
 
 .neptune
+
+*.pth
