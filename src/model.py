@@ -1,7 +1,7 @@
 from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments
 from transformers.integrations import NeptuneCallback
 from scipy.special import softmax
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score, roc_curve
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squared_error, mean_absolute_error
 import torch
 import torch.nn as nn
@@ -21,12 +21,16 @@ load_dotenv()
 base_address = os.getenv("BASE_ADDRESS")
 
 class CryptoBERT(Model):
-    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'{base_address}/artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
+    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'./artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
         super().__init__("huggingface ElKulako/cryptobert")
         self.model_addr = model_addr
         self.save_path = save_path
         self.load_path = load_path
         self.input_task = input_task
+        self.metrics = {}  # Initialize the metrics dictionary
+        self.labels = {}  # Initialize the labels dictionary
+        self.preds = {}  # Initialize the predictions dictionary
+        self.probs = {}  # Initialize the probabilities dictionary
         
         # Load configuration
         config = AutoConfig.from_pretrained(model_addr)
@@ -93,6 +97,9 @@ class CryptoBERT(Model):
             all_labels = np.concatenate(all_labels)
             all_preds = np.concatenate(all_preds)
             all_probs = np.concatenate(all_probs)  # Concatenate probabilities
+            self.labels[epoch] = all_labels
+            self.preds[epoch] = all_preds
+            self.probs[epoch] = all_probs
             if self.input_task == "classification":
                 results[epoch] = self.compute_metrics_classification(all_labels, all_preds, all_probs, neptune_run)
             elif self.input_task == "regression":
@@ -114,6 +121,9 @@ class CryptoBERT(Model):
     
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)
+    
+    def load_model(self, path):
+        self.model = torch.load(path)
 
     def evaluate(self, dataloader, device, neptune_run=None):
         """
@@ -184,17 +194,9 @@ class CryptoBERT(Model):
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
+        roc_auc = roc_auc_score(labels, probs[:, 1], multi_class='ovr')  # Assuming binary classification
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
-        # Log the confusion matrix image to Neptune
-        if neptune_run:
-            # Plot confusion matrix
-            disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
-            fig, ax = plt.subplots(figsize=(10, 10))
-            disp.plot(ax=ax, cmap='Blues', values_format='d')
-            plt.title('Confusion Matrix')
-            plt.savefig("./finetuned_training_confusion_matrix.png")
-            neptune_run["confusion_matrix"].upload("./finetuned_training_confusion_matrix.png")
 
         # Create a dictionary of metrics
         metrics = {
@@ -202,6 +204,8 @@ class CryptoBERT(Model):
             "f1": f1,
             "precision": precision,
             "recall": recall,
+            "roc_auc": roc_auc,
+            "confusion_matrix": conf_matrix
         }
 
         return metrics
@@ -297,3 +301,32 @@ class CryptoBERT(Model):
             )
 
         return trainer
+
+    def plot_confusion_matrix(self, epoch):
+        labels = self.labels[epoch]
+        preds = self.preds[epoch]
+        conf_matrix = confusion_matrix(labels, preds)
+        disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
+        fig, ax = plt.subplots(figsize=(10, 10))
+        disp.plot(ax=ax, cmap='Blues', values_format='d')
+        plt.title('Confusion Matrix')
+        plt.savefig(f"./confusion_matrix_epoch_{epoch}.png")
+        plt.close()
+
+    def plot_roc_curve(self):
+        plt.figure()
+        for epoch in range(len(self.labels)):
+            labels = self.labels[epoch]
+            probs = self.probs[epoch]
+            roc_auc = roc_auc_score(labels, probs[:, 1])  # Assuming binary classification
+            fpr, tpr, _ = roc_curve(labels, probs[:, 1])
+            plt.plot(fpr, tpr, label='ROC curve for epoch %d (area = %0.2f)' % (epoch, roc_auc))
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic')
+        plt.legend(loc="lower right")
+        plt.savefig('roc_curves.png')
+        plt.close()

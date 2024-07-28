@@ -8,11 +8,6 @@ import emoji
 import time
 
 class HFDataset(HuggingfaceDataset):
-    # def __init__(self):
-    #     self.ads_keywords = ["NFT", "bonus", "campaign", "invite", "friends"]
-    #     super().__init__()
-
-
     def preprocess(self, return_emojis = False, return_hashtags = False):
         ads_keywords = ["nft", "bonus", "campaign", "invite", "friends"]
         def run_all_preprocess_functions(item):
