@@ -21,7 +21,7 @@ load_dotenv()
 base_address = os.getenv("BASE_ADDRESS")
 
 class CryptoBERT(Model):
-    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'{base_address}/artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
+    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'./artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
         super().__init__("huggingface ElKulako/cryptobert")
         self.model_addr = model_addr
         self.save_path = save_path
@@ -121,6 +121,9 @@ class CryptoBERT(Model):
     
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)
+    
+    def load_model(self, path):
+        self.model = torch.load(path)
 
     def evaluate(self, dataloader, device, neptune_run=None):
         """
@@ -191,7 +194,7 @@ class CryptoBERT(Model):
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
-        roc_auc = roc_auc_score(labels, probs[:, 1])  # Assuming binary classification
+        roc_auc = roc_auc_score(labels, probs[:, 1], multi_class='ovr')  # Assuming binary classification
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
 
