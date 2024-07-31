@@ -23,7 +23,7 @@ def runner(args):
         exp = EXPERIMENTS.get(id)(logger=logger)
         exp.run()
         logger.info("generating report...")
-        report = exp.report()
+        report = exp.report('./result/')
         print(report)
     else:
         raise ValueError("no experiment with the given id exist")

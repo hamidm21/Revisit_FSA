@@ -1,4 +1,5 @@
 import datetime
+import random
 from datetime import timedelta
 
 from tqdm.auto import tqdm
@@ -14,7 +15,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
@@ -94,14 +95,14 @@ class SentimentLabelingExperiment(Experiment):
 class DirectionSplitTBL(Experiment):
     def __init__(
         self,
-        num_samples=60000,
+        num_samples=1000000,
         price_df_addr="raw/daily-2020.csv",
         text_df_addr="raw/combined_tweets_2020_labeled.csv",
         logger=None
     ):
         super().__init__(
             id=1,
-            base_addr=base_addr,
+            base_addr=".",
             model=CryptoBERT(),
             logger=logger,
             description="""
@@ -113,7 +114,7 @@ class DirectionSplitTBL(Experiment):
         self.text_df_addr = text_df_addr
         self.num_samples = num_samples
         # hard code essentials
-        self.labeler = TripleBarrierLabeler(volatility_period=10, upper_barrier_factor=1.5, lower_barrier_factor=1.2, vertical_barrier=7, min_trend_days=2, barrier_type='volatility')
+        self.labeler = TripleBarrierLabeler(volatility_period=8, upper_barrier_factor=1, lower_barrier_factor=1.1, vertical_barrier=5, min_trend_days=2, barrier_type='volatility', touch_type='HL')
 
         self.results = {}
 
@@ -121,11 +122,12 @@ class DirectionSplitTBL(Experiment):
         # constants
         params = {
             "samples": self.num_samples,
-            "SEED":42,
-            "TRAIN_TEST_SPLIT":0.2,
-            "TRAINING_BATCH_SIZE":5,
-            "EPOCHS":5,
-            "LEARNING_RATE":1e-5,
+            "SEED": 42,
+            "TRAIN_TEST_SPLIT": 0.2,
+            "TRAINING_BATCH_SIZE": 7,
+            "EPOCHS": 5,
+            "LEARNING_RATE": 1e-5,
+            "FOLDS": 5
         }
 
         self.start_time = datetime.datetime.now()
@@ -137,30 +139,38 @@ class DirectionSplitTBL(Experiment):
         price_df = self.load_price_data()
         self.labeler.fit(price_df)
         triple_barrier_labels = self.labeler.transform()
-        triple_barrier_labels["label"] = triple_barrier_labels["label"].shift(-1)
+        # Shift the labels such that for each day, the label is set to the next day's label
+        triple_barrier_labels["next_day_label"] = triple_barrier_labels.label.shift(-1)
+        triple_barrier_labels["next_day_window_start"] = triple_barrier_labels.window_start.shift(-1)
+        triple_barrier_labels.loc[triple_barrier_labels.iloc[0].name, 'next_day_window_start'] = True
         labeled_texts = text_df.merge(
-            triple_barrier_labels[["label"]], left_index=True, right_index=True, how="left"
+            triple_barrier_labels[["next_day_label", 'next_day_window_start']], left_index=True, right_index=True, how="left"
         )
         labeled_texts.dropna(inplace=True)
 
+        tweet_packs_to_df = lambda tweet_packs: pd.DataFrame([tweet for pack in tweet_packs for tweet in pack])
+
         # undersample labels
-        labeled_texts = self.undersample_tweets(labeled_texts)
+        balanced_df = self.undersample_tweets(labeled_texts, self.num_samples)
+        self.logger.info(f"distribution of labels: {labeled_texts.next_day_label.value_counts()}")
+        
+        windows = self.extract_windows(balanced_df)
+        tweets = self.extract_tweets(windows, balanced_df, 1000)
+        flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
+        shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
+        shuffled_df = tweet_packs_to_df(shuffled_tweet_packs)
+        shuffled_df["label"] = shuffled_df.next_day_label
 
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
-        labeled_texts = HFDataset.from_pandas(labeled_texts[["text", "label"]])
+        labeled_texts = HFDataset.from_pandas(shuffled_df[["text", "label"]])
         # preprocess the text column
         self.logger.info(f"preprocessing the dataset...")
         #labeled_texts = HFDataset.preprocess(labeled_texts)
 
         self.logger.info(f"slicing and spliting the dataset...")
         # Spliting the dataset for evaluation
-
-        self.logger.info(f"changing the label type of the dataset...")
-        labeled_texts = labeled_texts.shuffle()
-        #labeled_texts = labeled_texts.select(range(self.num_samples))
         labeled_texts = labeled_texts.class_encode_column('label')
-        labeled_texts = labeled_texts.train_test_split(params["TRAIN_TEST_SPLIT"], seed=42)
         self.logger.info(labeled_texts)
 
         # tokenizing the dataset text to be used in train and test loops
@@ -169,40 +179,92 @@ class DirectionSplitTBL(Experiment):
             tokenizer, labeled_texts
         )
 
+        kf = KFold(n_splits=params.get("FOLDS", 5))
+        train_folds = []
+        test_folds = []
+        for train_index, test_index in kf.split(labeled_texts):
+            train_folds.append(labeled_texts.select(train_index))
+            test_folds.append(labeled_texts.select(test_index))
+
+        
+        self.results = {
+            "base": {index: {} for index in range(params.get("FOLDS", 5))},
+            "train": {index: {} for index in range(params.get("FOLDS", 5))},
+            "eval": {index: {} for index in range(params.get("FOLDS", 5))}
+        }
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
-        trainer = self.model.get_trainer(labeled_texts["test"], neptune_run=neptune_run)
-        self.logger.info(f"evaluating the base model without fintuning...")
-        non_fine_tuned_eval_result = trainer.evaluate()
-        # Log metrics
-        self.results["base"] = {}
-        for key, value in non_fine_tuned_eval_result.items():
-            self.results["base"][key] = value
-            neptune_run[f"eval/{key}"].append(value)
+        #neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
+        for index in tqdm(range(params.get("FOLDS", 5))):
+            trainer = self.model.get_trainer(test_folds[index], neptune_run=None)
+            self.logger.info(f"evaluating the base model without fintuning...")
+            non_fine_tuned_eval_result = trainer.evaluate()
+            # Log metrics
+            for key, value in non_fine_tuned_eval_result.items():
+                self.results["base"][index][key] = value
+                #neptune_run[f"eval/{key}"].append(value)
 
-        neptune_run.stop()
+            #neptune_run.stop()
 
-        self.logger.info(f"preparing data for finetuning the model...")
-        train_dataset = TextDataset(labeled_texts['train'])
-        test_dataset = TextDataset(labeled_texts['test'])
+            self.logger.info(f"preparing data for finetuning the model...")
+            train_dataset = TextDataset(train_folds[index])
+            test_dataset = TextDataset(test_folds[index])
 
-        train_dataloader = DataLoader(train_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
-        test_dataloader = DataLoader(test_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
+            train_dataloader = DataLoader(train_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
+            test_dataloader = DataLoader(test_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
 
-        self.logger.info(f"training the model...")
-        neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
-        train_metrics = self.model.train(dataloader=train_dataloader, device=device, learning_rate=params["LEARNING_RATE"], epochs=params["EPOCHS"], neptune_run=neptune_run)
-        self.results["train"] = train_metrics
-        self.model.save_model("./trained.pth")
-        neptune_run.stop()
+            self.logger.info(f"training the model...")
+            #neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
 
-        self.logger.info(f"evaluating the finetuned model...")
-        neptune_run = self.init_neptune_run("#1.3", description="evaluating the base model without fintuning", params=params)
-        eval_metrics = self.model.evaluate(dataloader=test_dataloader, device=device, neptune_run=neptune_run)
-        self.results["eval"] = eval_metrics
-        neptune_run.stop()
+            # Initialize a dictionary to store the metrics for each epoch
+            train_metrics = {}
+            eval_metrics = {}
+            # Move the model to the device
+            self.model.model.to(device)
+
+            # Set up the optimizer
+            optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
+
+            best_epoch = {
+                "epoch": 0,
+                "roc_score": 0
+                }
+
+            for epoch in range(params["EPOCHS"]):
+                # Train the model for one epoch and get the labels, predictions, and probabilities
+                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"])
+
+                # Calculate the metrics for this epoch
+                train_metric = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs), neptune_run=None)
+                train_metrics[epoch] = train_metric
+               
+                # Plot the ROC curve
+                self.model.plot_roc_curve(f"./result/exp1/train/{index}/")
+
+                # Evaluate the model
+                self.logger.info(f"evaluating the model...")
+                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device)
+
+               # Compute the metrics
+                eval_metric = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs), neptune_run=None)
+                eval_metrics[epoch] = eval_metric
+
+                # Check if this model is the best so far
+                if eval_metric['roc_auc'] > best_epoch["roc_score"]:
+                    best_epoch["roc_score"] = eval_metric['roc_auc']
+                    best_epoch["epoch"] = epoch
+                    # Save the model
+                    self.model.save_model(f"./artifacts/exp1/{index}/trained.pth")
+
+                # Log the metrics
+                self.logger.info(f"\nEpoch {epoch+1}\ntrain metrics: {train_metric}\neval metrics: {eval_metric}\nbest epoch: {best_epoch}")
+     
+
+            # Store the metrics
+            self.results["train"][index] = train_metrics
+            self.results["eval"][index] = eval_metrics
 
         self.end_time = datetime.datetime.now()
+
         return self.results
 
     def load_textual_data(self) -> pd.DataFrame:
@@ -227,28 +289,91 @@ class DirectionSplitTBL(Experiment):
         return price_df
 
     @staticmethod
-    def undersample_tweets(df):
+    def undersample_tweets(df, num_samples=None):
         # Count the number of tweets for each trend
-        trend_counts = df['label'].value_counts()
-        
+        trend_counts = df['next_day_label'].value_counts()
+
         # Identify the minority class
         minority_class = trend_counts.idxmin()
         minority_count = trend_counts.min()
-        
+
+        # If num_samples is specified and less than minority_count, use num_samples instead
+        if num_samples is not None and num_samples < minority_count:
+            minority_count = num_samples
+
         # Initialize an empty DataFrame to store the undersampled data
         undersampled_df = pd.DataFrame()
-        
+
         # Iterate over the trends
-        for trend in df['label'].unique():
-            # If this is the minority class, add all tweets to the undersampled data
-            if trend == minority_class:
-                undersampled_df = pd.concat([undersampled_df, df[df['label'] == trend]])
-            else:
-                # Otherwise, randomly select a subset of tweets equal to the minority count
-                subset = df[df['label'] == trend].sample(minority_count)
-                undersampled_df = pd.concat([undersampled_df, subset])
-        
+        for trend in df['next_day_label'].unique():
+            # Randomly select a subset of tweets equal to the minority count
+            subset = df[df['next_day_label'] == trend].sample(minority_count)
+            undersampled_df = pd.concat([undersampled_df, subset])
+
         return undersampled_df
+
+    @staticmethod
+    def extract_windows(df, max_windows=None):
+        days = df.groupby(df.index.date).first()
+        window_origins = days[days['next_day_window_start']].index
+        windows = []
+        for i in range(len(window_origins) - 1):
+            # If max_windows is specified and we've reached the limit, break the loop
+            if max_windows is not None and len(windows) >= max_windows:
+                break
+            # Get the start and end index for each window
+            start_index = window_origins[i]
+            end_index = days.index[days.index.get_loc(window_origins[i + 1]) - 1]
+            # Append the window to the list
+            windows.append(days.loc[start_index:end_index])
+        # Append the last window if it doesn't exceed max_windows
+        if max_windows is None or len(windows) < max_windows:
+            windows.append(days.loc[window_origins[-1]:])
+        return windows
+
+    @staticmethod
+    def extract_tweets(windows, df, max_tweet_packs=None):
+        extracted_tweets = []
+        # Add a progress bar for the outer loop
+        for window in tqdm(windows, desc="Processing windows"):
+            # Get the dates within the window
+            dates = window.index
+            # Initialize a list to store the tweet packs for this window
+            window_tweet_packs = []
+            # Find the minimum number of tweets across all days in the window
+            min_tweet_count = min(df.loc[date.strftime('%Y-%m-%d'), 'text'].size for date in dates)
+            # Limit the number of tweet packs to extract if max_tweet_packs is specified
+            if max_tweet_packs is not None:
+                min_tweet_count = min(min_tweet_count, max_tweet_packs)
+            # Iterate over the range of the minimum tweet count
+            for i in range(min_tweet_count):
+                # Initialize a list to store the tweets for this tweet pack
+                tweet_pack = []
+                # Iterate over the dates in the window
+                for date in dates:
+                    # Get the i-th tweet for this date
+                    tweet = df.loc[date.strftime('%Y-%m-%d'), ["text", "next_day_label"]].iloc[i]
+                    # Add the tweet to the tweet pack
+                    tweet_pack.append(tweet)
+                # Add the tweet pack to the window tweet packs
+                window_tweet_packs.append(tweet_pack)
+            # Add the window tweet packs to the extracted tweets
+            extracted_tweets.append(window_tweet_packs)
+        return extracted_tweets
+
+    @staticmethod
+    def shuffle_tweet_packs(tweet_packs, seed=None):
+        # If a seed is provided, use it to initialize the random number generator
+        if seed is not None:
+            random.seed(seed)
+        # Make a copy of the tweet packs list
+        shuffled_packs = tweet_packs.copy()
+        # Shuffle the copied list in-place
+        random.shuffle(shuffled_packs)
+        # Return the shuffled list
+        return shuffled_packs
+
+
 
 class DirectionSplitSentiment(Experiment):
     def __init__(

@@ -1,4 +1,5 @@
 from logging import Logger
+import pickle
 import neptune
 import pandas as pd
 
@@ -32,7 +33,7 @@ class Experiment:
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def report(self):
+    def report(self, base_addr):
         """
         Report the results of the experiment.
 
@@ -49,6 +50,10 @@ class Experiment:
             "duration": duration,
             "results": self.results,
         }
+        # Save the report to a file at the given address
+        with open(f"{base_addr}/experiment_{self.id}_report.pkl", "wb") as f:
+            pickle.dump(report, f)
+
         return report
 
     @staticmethod

@@ -1,7 +1,9 @@
+from itertools import cycle
+from sklearn.preprocessing import label_binarize
 from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments
 from transformers.integrations import NeptuneCallback
 from scipy.special import softmax
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score, roc_curve, auc
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squared_error, mean_absolute_error
 import torch
 import torch.nn as nn
@@ -31,7 +33,9 @@ class CryptoBERT(Model):
         self.labels = {}  # Initialize the labels dictionary
         self.preds = {}  # Initialize the predictions dictionary
         self.probs = {}  # Initialize the probabilities dictionary
-        
+        self.eval_labels = {}
+        self.eval_preds = {}
+        self.eval_probs = {}
         # Load configuration
         config = AutoConfig.from_pretrained(model_addr)
         
@@ -48,136 +52,95 @@ class CryptoBERT(Model):
         else:
             self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, config=config, ignore_mismatched_sizes=True)
 
-    def train(self, dataloader, device, learning_rate=1e-5, epochs=5, neptune_run=None):
+    def train(self, dataloader, device, optimizer, learning_rate=1e-5):
         """
         Train the model on the given data and labels.
 
         Args:
-        data (any): The data to train the model on.
-        labels (any): The labels for the data.
+        dataloader (DataLoader): The DataLoader for the training data.
+        device (torch.device): The device to train the model on.
+        learning_rate (float): The learning rate for the optimizer.
+        
+        Returns:
+        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
         """
-        results = {}
-        # Move the model to the device
-        self.model.to(device)
-        # Set up the optimizer
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-        for epoch in tqdm(range(epochs)):  # Number of epochs
-            all_labels = []
-            all_preds = []
-            all_probs = []  # For storing probabilities
-            losses = []
-            for batch in tqdm(dataloader):
-                optimizer.zero_grad()
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                if self.input_task == "classification":
-                    labels = batch['labels'].to(device)
-                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss
-                elif self.input_task == "regression":
-                    labels = batch['labels'].to(device)  # Assuming true_range is provided in the batch
-                    outputs = self.model(input_ids, attention_mask=attention_mask)
-                    # Modify the loss function for regression task
-                    loss = nn.MSELoss()(outputs.logits.squeeze(), labels.float())
-                loss.backward()
-                optimizer.step()
+        all_labels = []
+        all_preds = []
+        all_probs = []  # For storing probabilities
 
-                # Store labels, predictions and probabilities for metrics calculation
-                preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                losses.append(loss.item())
-                all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
-                if self.input_task == "classification":
-                    class_preds = torch.argmax(preds, dim=-1)
-                elif self.input_task == "regression":
-                    class_preds = outputs.logits.squeeze()  # For regression, use logits directly
-                all_preds.append(class_preds.cpu().detach().numpy())
-                all_labels.append(labels.cpu().detach().numpy())
+        for batch in tqdm(dataloader, desc="Training Progress"):
+            optimizer.zero_grad()
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
 
-            # Calculate and log metrics after each epoch
-            all_labels = np.concatenate(all_labels)
-            all_preds = np.concatenate(all_preds)
-            all_probs = np.concatenate(all_probs)  # Concatenate probabilities
-            self.labels[epoch] = all_labels
-            self.preds[epoch] = all_preds
-            self.probs[epoch] = all_probs
-            if self.input_task == "classification":
-                results[epoch] = self.compute_metrics_classification(all_labels, all_preds, all_probs, neptune_run)
-            elif self.input_task == "regression":
-                results[epoch] = self.compute_metrics_regression(all_labels, all_preds)
+            outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
 
-            # Log metrics to Neptune
-            if neptune_run:
-                for key, value in results[epoch].items():
-                    neptune_run[f"train/{key}"].log(value)
+            # Store labels, predictions and probabilities for metrics calculation
+            preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            class_preds = torch.argmax(preds, dim=-1)
 
-            # Save the model after each epoch
-            # torch.save(self.model.state_dict(), self.save_path)
+            all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
+            all_preds.append(class_preds.cpu().detach().numpy())
+            all_labels.append(labels.cpu().detach().numpy())
 
-        # metrics for each epoch
-        return results
+        return all_labels, all_preds, all_probs
+
 
     def predict(self, data):
         raise NotImplementedError("Subclasses must implement this method.")
     
     def save_model(self, path):
+        # Create the output directory if it doesn't exist
+        dir_name = os.path.dirname(path)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name)
         torch.save(self.model.state_dict(), path)
-    
-    def load_model(self, path):
-        self.model = torch.load(path)
 
-    def evaluate(self, dataloader, device, neptune_run=None):
+    def load_model(self, path):
+        model_state = torch.load(path)
+        self.model.load_state_dict(model_state)
+        return self.model
+
+    def evaluate(self, dataloader, device):
         """
         Evaluate the model on the given data and labels.
 
         Args:
-        data (any): The data to evaluate the model on.
-        labels (any): The labels for the data.
+        dataloader (DataLoader): The DataLoader for the evaluation data.
+        device (torch.device): The device to evaluate the model on.
 
         Returns:
-        any: The evaluation results.
+        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
         """
         # Evaluation loop
-        results = {}
         self.model.to(device)
-        eval_loss = 0
         all_labels = []
         all_preds = []
         all_probs = []  # For storing probabilities
-        for batch in tqdm(dataloader):
+
+        for batch in tqdm(dataloader, desc="Evaluation Progress"):
             with torch.no_grad():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
-                if self.input_task == "classification":
-                    labels = batch['labels'].to(device)
-                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-                    eval_loss += outputs.loss.item()
-                    # Get the predicted probabilities from the model's outputs
-                    preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                    # Convert the probabilities to class labels
-                    class_preds = torch.argmax(preds, dim=-1)
-                    all_probs.append(preds.cpu().numpy())  # Store probabilities
-                elif self.input_task == "regression":
-                    labels = batch['labels'].to(device)
-                    outputs = self.model(input_ids, attention_mask=attention_mask)
-                    preds = outputs.logits.squeeze()  # For regression, use logits directly
+                labels = batch['labels'].to(device)
+
+                outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+
+                # Get the predicted probabilities from the model's outputs
+                preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                # Convert the probabilities to class labels
+                class_preds = torch.argmax(preds, dim=-1)
+
+                all_probs.append(preds.cpu().numpy())  # Store probabilities
                 all_preds.append(class_preds.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
 
-        # Calculate metrics
-        all_labels = np.concatenate(all_labels)
-        all_preds = np.concatenate(all_preds)
-        if self.input_task == "classification":
-            all_probs = np.concatenate(all_probs)  # Concatenate probabilities
-            results = self.compute_metrics_classification(all_labels, all_preds, all_probs, neptune_run)
-        elif self.input_task == "regression":
-            results = self.compute_metrics_regression(all_labels, all_preds)
+        return all_labels, all_preds, all_probs
 
-        # Log metrics to Neptune
-        if neptune_run:
-            for key, value in results.items():
-                neptune_run[f"eval/{key}"].log(value)
-
-        return results
 
     @staticmethod
     def compute_metrics_classification(labels, preds, probs, neptune_run=None):
@@ -194,7 +157,8 @@ class CryptoBERT(Model):
         """
         precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
         acc = accuracy_score(labels, preds)
-        roc_auc = roc_auc_score(labels, probs[:, 1], multi_class='ovr')  # Assuming binary classification
+        print(probs.shape, labels.shape)
+        roc_auc = roc_auc_score(labels, probs, multi_class='ovr')  # Assuming binary classification
         # Compute confusion matrix
         conf_matrix = confusion_matrix(labels, preds)
 
@@ -313,20 +277,41 @@ class CryptoBERT(Model):
         plt.savefig(f"./confusion_matrix_epoch_{epoch}.png")
         plt.close()
 
-    def plot_roc_curve(self):
-        plt.figure()
+    def plot_roc_curve(self, output_dir):
+        # Create the output directory if it doesn't exist
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
         for epoch in range(len(self.labels)):
-            labels = self.labels[epoch]
+            plt.figure()
+            # Binarize the labels for multi-class ROC AUC
+            labels = label_binarize(self.labels[epoch], classes=np.unique(np.concatenate(list(self.labels.values()))))
             probs = self.probs[epoch]
-            roc_auc = roc_auc_score(labels, probs[:, 1])  # Assuming binary classification
-            fpr, tpr, _ = roc_curve(labels, probs[:, 1])
-            plt.plot(fpr, tpr, label='ROC curve for epoch %d (area = %0.2f)' % (epoch, roc_auc))
-        plt.plot([0, 1], [0, 1], 'k--')
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('Receiver Operating Characteristic')
-        plt.legend(loc="lower right")
-        plt.savefig('roc_curves.png')
-        plt.close()
+            n_classes = labels.shape[1]
+
+            # Compute ROC curve and ROC area for each class
+            fpr = dict()
+            tpr = dict()
+            roc_auc = dict()
+            for i in range(n_classes):
+                fpr[i], tpr[i], _ = roc_curve(labels[:, i], probs[:, i])
+                roc_auc[i] = auc(fpr[i], tpr[i])
+
+            # Plot all ROC curves
+            colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
+            for i, color in zip(range(n_classes), colors):
+                plt.plot(fpr[i], tpr[i], color=color, lw=2,
+                         label='ROC curve of class {0} (area = {1:0.2f})'
+                         ''.format(i, roc_auc[i]))
+
+            plt.plot([0, 1], [0, 1], 'k--')
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('Receiver Operating Characteristic for Epoch {0}'.format(epoch))
+            plt.legend(loc="lower right")
+
+            # Save the figure to the output directory with a unique name
+            plt.savefig(os.path.join(output_dir, 'roc_curve_epoch_{0}.png'.format(epoch)))
+            plt.close()
