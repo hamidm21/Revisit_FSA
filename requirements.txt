@@ -104,3 +104,4 @@ webcolors==24.6.0
 websocket-client==1.8.0
 xxhash==3.4.1
 yarl==1.9.4
+rich==13.7.1

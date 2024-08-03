@@ -1,4 +1,5 @@
 from itertools import cycle
+from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from sklearn.preprocessing import label_binarize
 from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments
 from transformers.integrations import NeptuneCallback
@@ -7,6 +8,7 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, mean_squared_error, mean_absolute_error
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import LambdaLR
 from typing import Optional
 from tqdm.auto import tqdm
 import numpy as np
@@ -52,44 +54,6 @@ class CryptoBERT(Model):
         else:
             self.model = AutoModelForSequenceClassification.from_pretrained(self.model_addr, config=config, ignore_mismatched_sizes=True)
 
-    def train(self, dataloader, device, optimizer, learning_rate=1e-5):
-        """
-        Train the model on the given data and labels.
-
-        Args:
-        dataloader (DataLoader): The DataLoader for the training data.
-        device (torch.device): The device to train the model on.
-        learning_rate (float): The learning rate for the optimizer.
-        
-        Returns:
-        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
-        """
-        all_labels = []
-        all_preds = []
-        all_probs = []  # For storing probabilities
-
-        for batch in tqdm(dataloader, desc="Training Progress"):
-            optimizer.zero_grad()
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-
-            outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-
-            # Store labels, predictions and probabilities for metrics calculation
-            preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
-            class_preds = torch.argmax(preds, dim=-1)
-
-            all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
-            all_preds.append(class_preds.cpu().detach().numpy())
-            all_labels.append(labels.cpu().detach().numpy())
-
-        return all_labels, all_preds, all_probs
-
-
     def predict(self, data):
         raise NotImplementedError("Subclasses must implement this method.")
     
@@ -105,7 +69,68 @@ class CryptoBERT(Model):
         self.model.load_state_dict(model_state)
         return self.model
 
-    def evaluate(self, dataloader, device):
+    def train(self, dataloader, device, optimizer, learning_rate=2e-5, num_epochs=3, num_folds=5, neptune_run=None):
+        """
+        Train the model on the given data and labels.
+
+        Args:
+        dataloader (DataLoader): The DataLoader for the training data.
+        device (torch.device): The device to train the model on.
+        learning_rate (float): The learning rate for the optimizer.
+        num_epochs (int): The number of epochs for training.
+        num_folds (int): The number of folds for cross-validation.
+        neptune_run (neptune.run.Run): The Neptune run instance.
+
+        Returns:
+        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
+        """
+        all_labels = []
+        all_preds = []
+        all_probs = []  # For storing probabilities
+
+        num_batches = len(dataloader)
+        total_training_steps = num_epochs * num_batches * num_folds
+        num_warmup_steps = int(0.1 * total_training_steps)
+
+        # Initialize the learning rate scheduler
+        scheduler = self.get_linear_schedule_with_warmup(optimizer, num_warmup_steps, total_training_steps)
+
+        for epoch in range(num_epochs):
+            for fold in range(num_folds):
+                for batch in tqdm(dataloader, desc=f"Training Progress... Epoch {epoch+1}/{num_epochs}, Fold {fold+1}/{num_folds}", leave=False, dynamic_ncols=True):
+                    optimizer.zero_grad()
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+                    labels = batch['labels'].to(device)
+
+                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+                    loss = outputs.loss
+                    loss.backward()
+                    optimizer.step()
+
+                    # Store labels, predictions and probabilities for metrics calculation
+                    preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
+                    class_preds = torch.argmax(preds, dim=-1)
+
+                    all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
+                    all_preds.append(class_preds.cpu().detach().numpy())
+                    all_labels.append(labels.cpu().detach().numpy())
+
+                    # Step the scheduler
+                    scheduler.step()
+
+                    if neptune_run:
+                        # Log metrics to Neptune
+                        neptune_metrics = ["accuracy", "precision", "f1", "recall"]
+                        # Compute metrics
+                        metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
+                        for metric_name in neptune_metrics:
+                            neptune_run[f"train/{metric_name}"].append(metrics.get(metric_name))
+
+        return all_labels, all_preds, all_probs
+
+
+    def evaluate(self, dataloader, device, model_name="base", neptune_run=None):
         """
         Evaluate the model on the given data and labels.
 
@@ -117,12 +142,11 @@ class CryptoBERT(Model):
         Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
         """
         # Evaluation loop
-        self.model.to(device)
         all_labels = []
         all_preds = []
         all_probs = []  # For storing probabilities
 
-        for batch in tqdm(dataloader, desc="Evaluation Progress"):
+        for batch in tqdm(dataloader, desc="Evaluating Progress...", leave=False, dynamic_ncols=True):
             with torch.no_grad():
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
@@ -139,11 +163,19 @@ class CryptoBERT(Model):
                 all_preds.append(class_preds.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
 
+            if neptune_run:
+                # Log metrics to Neptune
+                neptune_metrics = ["accuracy", "precision", "f1", "recall"]
+                # Compute metrics
+                metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
+                for metric_name in neptune_metrics:
+                    neptune_run[f"{model_name}/{metric_name}"].append(metrics.get(metric_name))
+
+
         return all_labels, all_preds, all_probs
 
-
     @staticmethod
-    def compute_metrics_classification(labels, preds, probs, neptune_run=None):
+    def compute_metrics_classification(labels, preds, probs, metrics_to_return=None):
         """
         Compute classification metrics based on the model's predictions and the true labels.
 
@@ -151,30 +183,37 @@ class CryptoBERT(Model):
         labels (any): The true labels.
         preds (any): The model's predictions.
         probs (any): The model's probabilities
+        metrics_to_return (list): List of metric names to compute and return.
 
         Returns:
         dict: The computed classification metrics.
         """
-        precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
-        acc = accuracy_score(labels, preds)
-        print(probs.shape, labels.shape)
-        roc_auc = roc_auc_score(labels, probs, multi_class='ovr')  # Assuming binary classification
-        # Compute confusion matrix
-        conf_matrix = confusion_matrix(labels, preds)
+        if metrics_to_return is None:
+            metrics_to_return = ["accuracy", "f1", "precision", "recall", "roc_auc", "confusion_matrix"]
 
-        # Create a dictionary of metrics
-        metrics = {
-            "accuracy": acc,
-            "f1": f1,
-            "precision": precision,
-            "recall": recall,
-            "roc_auc": roc_auc,
-            "confusion_matrix": conf_matrix
-        }
+        metrics = {}
+
+        if "precision" in metrics_to_return or "recall" in metrics_to_return or "f1" in metrics_to_return:
+            precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
+            if "precision" in metrics_to_return:
+                metrics["precision"] = precision
+            if "recall" in metrics_to_return:
+                metrics["recall"] = recall
+            if "f1" in metrics_to_return:
+                metrics["f1"] = f1
+
+        if "accuracy" in metrics_to_return:
+            metrics["accuracy"] = accuracy_score(labels, preds)
+
+        if "roc_auc" in metrics_to_return:
+            metrics["roc_auc"] = roc_auc_score(labels, probs, multi_class='ovr')
+
+        if "confusion_matrix" in metrics_to_return:
+            metrics["confusion_matrix"] = confusion_matrix(labels, preds)
 
         return metrics
 
-    @staticmethod
+
     def compute_metrics_regression(labels, preds):
         """
         Compute regression metrics based on the model's predictions and the true labels.
@@ -197,121 +236,87 @@ class CryptoBERT(Model):
 
         return metrics
 
+    @staticmethod
+    def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+        def lr_lambda(current_step):
+            if current_step < num_warmup_steps:
+                return float(current_step) / float(max(1, num_warmup_steps))
+            return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+        return LambdaLR(optimizer, lr_lambda)
 
-    def get_trainer(self, eval_dataset, neptune_run: Optional[object] = None, train_dataset=None):
 
-        def compute_metrics_regression(pred):
-            labels = pred.label_ids
-            preds = pred.predictions.squeeze()  # For regression, use predictions directly
-            mae = mean_absolute_error(labels, preds)
-            mse = mean_squared_error(labels, preds)
-            return {
-                'mean_absolute_error': mae,
-                'mean_squared_error': mse
-            }
+    @staticmethod
+    def plot_confusion_matrix(path, labels, preds):
+        """
+        Plot the confusion matrix for the given labels and predictions.
 
-        def compute_metrics_classification(pred):
-            labels = pred.label_ids
-            preds = pred.predictions.argmax(-1)
-            probs = softmax(pred.predictions, axis=1)
-            precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro')
-            acc = accuracy_score(labels, preds)
-            roc_auc=0
-            conf_matrix=0
-            try:
-                roc_auc = roc_auc_score(labels, probs, multi_class='ovr')
-            except:
-                pass
-            try:
-                conf_matrix = confusion_matrix(labels, preds)
-                # Plot confusion matrix
-                disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
-                fig, ax = plt.subplots(figsize=(10, 10))
-                disp.plot(ax=ax, cmap='Blues', values_format='d')
-                plt.title('Confusion Matrix')
-                # Save the confusion matrix to a file
-                plt.savefig("./result/exp1/base_confusion_matrix.png")
-                # Log the confusion matrix image to Neptune
-                if neptune_run:
-                    neptune_run["confusion_matrix"].upload("./result/exp1/base_confusion_matrix.png")
-            except:
-                pass
-            return {
-                'accuracy': acc,
-                'f1': f1,
-                'precision': precision,
-                'recall': recall,
-            }
+        Args:
+        output_dir (str): The directory to save the confusion matrix plot.
+        labels (list): The true labels.
+        preds (list): The predicted labels.
 
-        # Choose compute_metrics function based on the task type
-        if self.input_task == "classification":
-            compute_metrics_func = compute_metrics_classification
-        elif self.input_task == "regression":
-            compute_metrics_func = compute_metrics_regression
+        Returns:
+        None
+        """
+        # Create the output directory if it doesn't exist
+        output_dir = os.path.dirname(path)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
-        # Define Trainer arguments
-        trainer_args = TrainingArguments(
-            output_dir=self.save_path,
-            report_to="none"
-        )
-
-        # Create Trainer instance
-        trainer = Trainer(
-            model=self.model,                 # the non-fine-tuned model
-            args=trainer_args,                # training arguments, defined above
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,        # test dataset
-            compute_metrics=compute_metrics_func,   # the compute_metrics function
-            )
-
-        return trainer
-
-    def plot_confusion_matrix(self, epoch):
-        labels = self.labels[epoch]
-        preds = self.preds[epoch]
         conf_matrix = confusion_matrix(labels, preds)
         disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Down', 'Neutral', 'Up'])
         fig, ax = plt.subplots(figsize=(10, 10))
         disp.plot(ax=ax, cmap='Blues', values_format='d')
         plt.title('Confusion Matrix')
-        plt.savefig(f"./confusion_matrix_epoch_{epoch}.png")
+        plt.savefig(path)
         plt.close()
 
-    def plot_roc_curve(self, output_dir):
+    @staticmethod
+    def plot_roc_curve(path, labels, probs):
+        """
+        Plot the ROC curve for the given labels and probabilities.
+
+        Args:
+        path (str): The path to save the ROC curve plots.
+        labels (list): The true labels.
+        probs (list): The predicted probabilities.
+
+        Returns:
+        None
+        """
         # Create the output directory if it doesn't exist
+        output_dir = os.path.dirname(path)
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        for epoch in range(len(self.labels)):
-            plt.figure()
-            # Binarize the labels for multi-class ROC AUC
-            labels = label_binarize(self.labels[epoch], classes=np.unique(np.concatenate(list(self.labels.values()))))
-            probs = self.probs[epoch]
-            n_classes = labels.shape[1]
+        plt.figure()
+        # Binarize the labels for multi-class ROC AUC
+        labels = label_binarize(labels, classes=np.unique(labels))
+        n_classes = labels.shape[1]
 
-            # Compute ROC curve and ROC area for each class
-            fpr = dict()
-            tpr = dict()
-            roc_auc = dict()
-            for i in range(n_classes):
-                fpr[i], tpr[i], _ = roc_curve(labels[:, i], probs[:, i])
-                roc_auc[i] = auc(fpr[i], tpr[i])
+        # Compute ROC curve and ROC area for each class
+        fpr = dict()
+        tpr = dict()
+        roc_auc = dict()
+        for i in range(n_classes):
+            fpr[i], tpr[i], _ = roc_curve(labels[:, i], probs[:, i])
+            roc_auc[i] = auc(fpr[i], tpr[i])
 
-            # Plot all ROC curves
-            colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
-            for i, color in zip(range(n_classes), colors):
-                plt.plot(fpr[i], tpr[i], color=color, lw=2,
-                         label='ROC curve of class {0} (area = {1:0.2f})'
-                         ''.format(i, roc_auc[i]))
+        # Plot all ROC curves
+        colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
+        for i, color in zip(range(n_classes), colors):
+            plt.plot(fpr[i], tpr[i], color=color, lw=2,
+                     label='ROC curve of class {0} (area = {1:0.2f})'
+                     ''.format(i, roc_auc[i]))
 
-            plt.plot([0, 1], [0, 1], 'k--')
-            plt.xlim([0.0, 1.0])
-            plt.ylim([0.0, 1.05])
-            plt.xlabel('False Positive Rate')
-            plt.ylabel('True Positive Rate')
-            plt.title('Receiver Operating Characteristic for Epoch {0}'.format(epoch))
-            plt.legend(loc="lower right")
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic')
+        plt.legend(loc="lower right")
 
-            # Save the figure to the output directory with a unique name
-            plt.savefig(os.path.join(output_dir, 'roc_curve_epoch_{0}.png'.format(epoch)))
-            plt.close()
+        # Save the figure to the output directory with a unique name
+        plt.savefig(path)
+        plt.close()

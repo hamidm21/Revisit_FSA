@@ -176,3 +176,4 @@ artifacts/*
 .neptune
 
 *.pth
+result/*

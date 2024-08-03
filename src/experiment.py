@@ -1,7 +1,7 @@
 import datetime
 import random
 from datetime import timedelta
-
+import warnings
 from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
@@ -15,12 +15,13 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
 from datasets import Dataset, ClassLabel
-
+from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
+from collections import Counter
 
 # internal imports
 from type import Experiment
@@ -39,6 +40,12 @@ load_dotenv()
 # Access the base address
 base_addr = os.getenv("BASE_ADDRESS")
 
+# Disable specific warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="accelerate")
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub.file_download")
+warnings.filterwarnings("ignore", module="sklearn.metrics._classification")
+neptune_logger = logging.getLogger('neptune')
+neptune_logger.setLevel(logging.ERROR)
 
 class SentimentLabelingExperiment(Experiment):
     def __init__(self, logger=None, data_addr='./raw/combined_2015_to_2021.csv'):
@@ -95,7 +102,7 @@ class SentimentLabelingExperiment(Experiment):
 class DirectionSplitTBL(Experiment):
     def __init__(
         self,
-        num_samples=1000000,
+        num_samples=0,
         price_df_addr="raw/daily-2020.csv",
         text_df_addr="raw/combined_tweets_2020_labeled.csv",
         logger=None
@@ -121,12 +128,12 @@ class DirectionSplitTBL(Experiment):
     def run(self):
         # constants
         params = {
-            "samples": self.num_samples,
+            "samples": 0,
             "SEED": 42,
             "TRAIN_TEST_SPLIT": 0.2,
-            "TRAINING_BATCH_SIZE": 7,
-            "EPOCHS": 5,
-            "LEARNING_RATE": 1e-5,
+            "TRAINING_BATCH_SIZE": 16,
+            "EPOCHS": 3,
+            "LEARNING_RATE": 2e-5,
             "FOLDS": 5
         }
 
@@ -150,17 +157,17 @@ class DirectionSplitTBL(Experiment):
 
         tweet_packs_to_df = lambda tweet_packs: pd.DataFrame([tweet for pack in tweet_packs for tweet in pack])
 
-        # undersample labels
-        balanced_df = self.undersample_tweets(labeled_texts, self.num_samples)
-        self.logger.info(f"distribution of labels: {labeled_texts.next_day_label.value_counts()}")
-        
-        windows = self.extract_windows(balanced_df)
-        tweets = self.extract_tweets(windows, balanced_df, 1000)
+        windows = self.extract_windows(labeled_texts)
+        tweets = self.extract_tweets(windows, labeled_texts, 50)
         flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
         shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
         shuffled_df = tweet_packs_to_df(shuffled_tweet_packs)
-        shuffled_df["label"] = shuffled_df.next_day_label
+        shuffled_df["label"] = shuffled_df.next_day_label 
 
+        # undersample labels
+        shuffled_df = self.undersample_tweets(shuffled_df, None)
+        self.logger.info(f"distribution of labels: {labeled_texts.next_day_label.value_counts()}")
+        params["samples"] = shuffled_df.shape[0]
         # creating a huggingface dataset for base model evaluation
         self.logger.info(f"creating and tokenizing the dataset...")
         labeled_texts = HFDataset.from_pandas(shuffled_df[["text", "label"]])
@@ -179,92 +186,105 @@ class DirectionSplitTBL(Experiment):
             tokenizer, labeled_texts
         )
 
-        kf = KFold(n_splits=params.get("FOLDS", 5))
+        kf = StratifiedKFold(n_splits=params.get("FOLDS", 5))
         train_folds = []
         test_folds = []
-        for train_index, test_index in kf.split(labeled_texts):
+
+        # Assuming labeled_texts is a dataset with labels in a column named 'label'
+        labels = labeled_texts['label']
+        for train_index, test_index in kf.split(labeled_texts, labels):
             train_folds.append(labeled_texts.select(train_index))
             test_folds.append(labeled_texts.select(test_index))
 
-        
         self.results = {
-            "base": {index: {} for index in range(params.get("FOLDS", 5))},
-            "train": {index: {} for index in range(params.get("FOLDS", 5))},
-            "eval": {index: {} for index in range(params.get("FOLDS", 5))}
+            "params": params,
+            "base": {f"fold_{fold + 1}": {} for fold in range(params.get("FOLDS", 5))},
+            "train": {f"fold_{fold + 1}": {f"epoch_{epoch + 1}": {} for epoch in range(params.get("EPOCHS", 5))} for fold in range(params.get("FOLDS", 5))},
+            "eval": {f"fold_{fold + 1}": {f"epoch_{epoch + 1}": {} for epoch in range(params.get("EPOCHS", 5))} for fold in range(params.get("FOLDS", 5))},
+            "selected_epochs": {f"fold_{fold + 1}": {} for fold in range(params.get("FOLDS", 5))}
         }
-        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        #neptune_run = self.init_neptune_run("#1.1", description="evaluating the base model without fintuning", params=params)
-        for index in tqdm(range(params.get("FOLDS", 5))):
-            trainer = self.model.get_trainer(test_folds[index], neptune_run=None)
-            self.logger.info(f"evaluating the base model without fintuning...")
-            non_fine_tuned_eval_result = trainer.evaluate()
-            # Log metrics
-            for key, value in non_fine_tuned_eval_result.items():
-                self.results["base"][index][key] = value
-                #neptune_run[f"eval/{key}"].append(value)
 
-            #neptune_run.stop()
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') 
+        for index in tqdm(range(params.get("FOLDS", 5)), desc="Folds Progress..."):
+            fold_num = index + 1
+            neptune_run = self.init_neptune_run(f"Fold_{1}", description="evaluating the base model without fintuning", params=params)
 
-            self.logger.info(f"preparing data for finetuning the model...")
             train_dataset = TextDataset(train_folds[index])
             test_dataset = TextDataset(test_folds[index])
 
             train_dataloader = DataLoader(train_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
             test_dataloader = DataLoader(test_dataset, batch_size=params["TRAINING_BATCH_SIZE"])
 
-            self.logger.info(f"training the model...")
-            #neptune_run = self.init_neptune_run("#1.2", description="finetuning the base model on impact labels", params=params)
-
-            # Initialize a dictionary to store the metrics for each epoch
-            train_metrics = {}
-            eval_metrics = {}
             # Move the model to the device
             self.model.model.to(device)
-
+            labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name="base", neptune_run=neptune_run)
+            base_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
+            self.results["base"][f"fold_{fold_num}"] = base_metrics
+            self.to_pickle(f"./result/report/exp1/fold_{fold_num}/base.pkl", self.results["base"][f"fold_{fold_num}"])
+            self.to_pickle(f"./result/output/exp1/fold_{fold_num}/base.pkl", {"labels": labels, "preds": preds, "probs": probs})
+            self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+            self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png", np.concatenate(labels), np.concatenate(preds))
+            neptune_run["base/roc_curve"].upload(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png")
+            neptune_run["base/matrix"].upload(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png")                                
+             
             # Set up the optimizer
             optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
 
-            best_epoch = {
-                "epoch": 0,
-                "roc_score": 0
-                }
+            # Initialize early stopping parameters
+            best_score = float('-inf')
+            patience = 1  # Number of epochs to wait for improvement
+            epochs_no_improve = 0
 
-            for epoch in range(params["EPOCHS"]):
+            for epoch in tqdm(range(params.get("EPOCHS", 3)), desc="Epoch Progress..."):
+                epoch_num = epoch + 1
                 # Train the model for one epoch and get the labels, predictions, and probabilities
-                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"])
+                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"], neptune_run=neptune_run)
 
                 # Calculate the metrics for this epoch
-                train_metric = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs), neptune_run=None)
-                train_metrics[epoch] = train_metric
-               
-                # Plot the ROC curve
-                self.model.plot_roc_curve(f"./result/exp1/train/{index}/")
+                train_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
+                self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = train_metrics
+                self.to_pickle(f"./result/report/exp1/fold_{fold_num}/epoch_{epoch_num}/train.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
+                self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/train.pkl", {"labels": labels, "preds": preds, "probs": probs})
+                self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+                self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png", np.concatenate(labels), np.concatenate(preds))
+                neptune_run[f"train/roc_curve_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png")
+                neptune_run[f"train/matrix_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png")
 
                 # Evaluate the model
-                self.logger.info(f"evaluating the model...")
-                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device)
+                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name="eval", neptune_run=neptune_run)
 
-               # Compute the metrics
-                eval_metric = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs), neptune_run=None)
-                eval_metrics[epoch] = eval_metric
+                # Compute the metrics
+                eval_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
+                self.results["eval"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = eval_metrics
+                self.to_pickle(f"./result/report/exp1/fold_{fold_num}/epoch_{epoch_num}/eval.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
+                self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/eval.pkl", {"labels": labels, "preds": preds, "probs": probs})
+                self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+                self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png", np.concatenate(labels), np.concatenate(preds))
+                neptune_run[f"eval/roc_curve_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png")
+                neptune_run[f"eval/matrix_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png")
 
                 # Check if this model is the best so far
-                if eval_metric['roc_auc'] > best_epoch["roc_score"]:
-                    best_epoch["roc_score"] = eval_metric['roc_auc']
+                if eval_metrics['roc_score'] > best_score:
+                    best_score = eval_metrics['roc_score']
+                    best_epoch["roc_score"] = eval_metrics['roc_score']
                     best_epoch["epoch"] = epoch
                     # Save the model
                     self.model.save_model(f"./artifacts/exp1/{index}/trained.pth")
+                    epochs_no_improve = 0  # Reset the counter
+                else:
+                    epochs_no_improve += 1
 
-                # Log the metrics
-                self.logger.info(f"\nEpoch {epoch+1}\ntrain metrics: {train_metric}\neval metrics: {eval_metric}\nbest epoch: {best_epoch}")
-     
+                # Early stopping
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch_num}")
+                    break
 
-            # Store the metrics
-            self.results["train"][index] = train_metrics
-            self.results["eval"][index] = eval_metrics
+            neptune_run.stop()
+            self.results["selected_epochs"][f"fold_{fold_num}"] = best_epoch
+
 
         self.end_time = datetime.datetime.now()
-
+        self.report("./result/report/exp1/")
         return self.results
 
     def load_textual_data(self) -> pd.DataFrame:
@@ -341,7 +361,10 @@ class DirectionSplitTBL(Experiment):
             # Initialize a list to store the tweet packs for this window
             window_tweet_packs = []
             # Find the minimum number of tweets across all days in the window
-            min_tweet_count = min(df.loc[date.strftime('%Y-%m-%d'), 'text'].size for date in dates)
+            min_tweet_count = min(
+                df.loc[date.strftime('%Y-%m-%d'), 'text'].size if isinstance(df.loc[date.strftime('%Y-%m-%d'), 'text'], (pd.Series, pd.DataFrame)) else 1
+                for date in dates
+            )
             # Limit the number of tweet packs to extract if max_tweet_packs is specified
             if max_tweet_packs is not None:
                 min_tweet_count = min(min_tweet_count, max_tweet_packs)
