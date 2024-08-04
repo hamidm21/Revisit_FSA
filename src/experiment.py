@@ -130,7 +130,6 @@ class DirectionSplitTBL(Experiment):
         params = {
             "samples": 0,
             "SEED": 42,
-            "TRAIN_TEST_SPLIT": 0.2,
             "TRAINING_BATCH_SIZE": 16,
             "EPOCHS": 3,
             "LEARNING_RATE": 1e-5,
@@ -223,8 +222,8 @@ class DirectionSplitTBL(Experiment):
             self.to_pickle(f"./result/output/exp1/fold_{fold_num}/base.pkl", {"labels": labels, "preds": preds, "probs": probs})
             self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
             self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png", np.concatenate(labels), np.concatenate(preds))
-            neptune_run[f"base/roc_curve_fold_{fold_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png")
-            neptune_run[f"base/matrix_fold_{fold_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png")                                
+            neptune_run[f"base/fold_{fold_num}/roc_curve"].upload(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png") if neptune_run else None
+            neptune_run[f"base/fold_{fold_num}/matrix"].upload(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png") if neptune_run else None
              
             # Set up the optimizer
             optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
@@ -239,18 +238,19 @@ class DirectionSplitTBL(Experiment):
 
             for epoch in tqdm(range(params.get("EPOCHS", 3)), desc="Epoch Progress..."):
                 epoch_num = epoch + 1
+                fold_epoch_addr = f"fold_{fold_num}/epoch_{epoch_num}"
                 # Train the model for one epoch and get the labels, predictions, and probabilities
                 labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"], model_name=f"train_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Calculate the metrics for this epoch
                 train_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = train_metrics
-                self.to_pickle(f"./result/report/exp1/fold_{fold_num}/epoch_{epoch_num}/train.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
-                self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/train.pkl", {"labels": labels, "preds": preds, "probs": probs})
-                self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
-                self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png", np.concatenate(labels), np.concatenate(preds))
-                neptune_run[f"train/roc_curve_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png")
-                neptune_run[f"train/matrix_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png")
+                self.to_pickle(f"./result/report/exp1//train.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
+                self.to_pickle(f"./result/output/exp1/{fold_epoch_addr}/train.pkl", {"labels": labels, "preds": preds, "probs": probs})
+                self.model.plot_roc_curve(f"./result/figure/exp1/{fold_epoch_addr}/train_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+                self.model.plot_confusion_matrix(f"./result/figure/exp1/{fold_epoch_addr}/train_matrix.png", np.concatenate(labels), np.concatenate(preds))
+                neptune_run[f"train/{fold_epoch_addr}/roc_curve"].upload(f"./result/figure/exp1/{fold_epoch_addr}/train_roc_curve.png") if neptune_run else None
+                neptune_run[f"train/{fold_epoch_addr}/matrix"].upload(f"./result/figure/exp1/{fold_epoch_addr}/train_matrix.png") if neptune_run else None
 
                 # Evaluate the model
                 labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"eval_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
@@ -258,12 +258,12 @@ class DirectionSplitTBL(Experiment):
                 # Compute the metrics
                 eval_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["eval"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = eval_metrics
-                self.to_pickle(f"./result/report/exp1/fold_{fold_num}/epoch_{epoch_num}/eval.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
-                self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/eval.pkl", {"labels": labels, "preds": preds, "probs": probs})
-                self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
-                self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png", np.concatenate(labels), np.concatenate(preds))
-                neptune_run[f"eval/roc_curve_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png")
-                neptune_run[f"eval/matrix_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png")
+                self.to_pickle(f"./result/report/exp1/{fold_epoch_addr}/eval.pkl", self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"])
+                self.to_pickle(f"./result/output/exp1/{fold_epoch_addr}/eval.pkl", {"labels": labels, "preds": preds, "probs": probs})
+                self.model.plot_roc_curve(f"./result/figure/exp1/{fold_epoch_addr}/eval_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+                self.model.plot_confusion_matrix(f"./result/figure/exp1/{fold_epoch_addr}/eval_matrix.png", np.concatenate(labels), np.concatenate(preds))
+                neptune_run[f"eval/{fold_epoch_addr}/roc_curve"].upload(f"./result/figure/exp1/{fold_epoch_addr}/eval_roc_curve.png") if neptune_run else None
+                neptune_run[f"eval/{fold_epoch_addr}/matrix"].upload(f"./result/figure/exp1/{fold_epoch_addr}/train_matrix.png") if neptune_run else None
 
                 # Check if this model is the best so far
                 if eval_metrics['roc_score'] > best_epoch["roc_score"]:

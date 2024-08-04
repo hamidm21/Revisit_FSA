@@ -86,7 +86,7 @@ class CryptoBERT(Model):
         """
         all_labels = []
         all_preds = []
-        all_probs = []  # For storing probabilities
+        all_probs = []
 
         for batch in tqdm(dataloader, desc=f"Training Progress...", leave=False, dynamic_ncols=True):
             optimizer.zero_grad()
