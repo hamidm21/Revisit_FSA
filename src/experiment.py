@@ -133,7 +133,7 @@ class DirectionSplitTBL(Experiment):
             "TRAIN_TEST_SPLIT": 0.2,
             "TRAINING_BATCH_SIZE": 16,
             "EPOCHS": 3,
-            "LEARNING_RATE": 2e-5,
+            "LEARNING_RATE": 1e-5,
             "FOLDS": 5
         }
 
@@ -158,7 +158,7 @@ class DirectionSplitTBL(Experiment):
         tweet_packs_to_df = lambda tweet_packs: pd.DataFrame([tweet for pack in tweet_packs for tweet in pack])
 
         windows = self.extract_windows(labeled_texts)
-        tweets = self.extract_tweets(windows, labeled_texts, 50)
+        tweets = self.extract_tweets(windows, labeled_texts, 3)
         flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
         shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
         shuffled_df = tweet_packs_to_df(shuffled_tweet_packs)
@@ -205,10 +205,9 @@ class DirectionSplitTBL(Experiment):
         }
 
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') 
+        neptune_run = self.init_neptune_run(f"exp_1", description="evaluating the base model without fintuning", params=params)
         for index in tqdm(range(params.get("FOLDS", 5)), desc="Folds Progress..."):
             fold_num = index + 1
-            neptune_run = self.init_neptune_run(f"Fold_{1}", description="evaluating the base model without fintuning", params=params)
-
             train_dataset = TextDataset(train_folds[index])
             test_dataset = TextDataset(test_folds[index])
 
@@ -217,28 +216,31 @@ class DirectionSplitTBL(Experiment):
 
             # Move the model to the device
             self.model.model.to(device)
-            labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name="base", neptune_run=neptune_run)
+            labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"base_fold_{fold_num}", neptune_run=neptune_run)
             base_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
             self.results["base"][f"fold_{fold_num}"] = base_metrics
             self.to_pickle(f"./result/report/exp1/fold_{fold_num}/base.pkl", self.results["base"][f"fold_{fold_num}"])
             self.to_pickle(f"./result/output/exp1/fold_{fold_num}/base.pkl", {"labels": labels, "preds": preds, "probs": probs})
             self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
             self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png", np.concatenate(labels), np.concatenate(preds))
-            neptune_run["base/roc_curve"].upload(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png")
-            neptune_run["base/matrix"].upload(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png")                                
+            neptune_run[f"base/roc_curve_fold_{fold_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/base_roc_curve.png")
+            neptune_run[f"base/matrix_fold_{fold_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/base_matrix.png")                                
              
             # Set up the optimizer
             optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
 
             # Initialize early stopping parameters
-            best_score = float('-inf')
+            best_epoch = {
+                    "roc_score": float('-inf'),
+                    "epoch": 0
+                    }
             patience = 1  # Number of epochs to wait for improvement
             epochs_no_improve = 0
 
             for epoch in tqdm(range(params.get("EPOCHS", 3)), desc="Epoch Progress..."):
                 epoch_num = epoch + 1
                 # Train the model for one epoch and get the labels, predictions, and probabilities
-                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"], neptune_run=neptune_run)
+                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"], model_name=f"train_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Calculate the metrics for this epoch
                 train_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
@@ -247,11 +249,11 @@ class DirectionSplitTBL(Experiment):
                 self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/train.pkl", {"labels": labels, "preds": preds, "probs": probs})
                 self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
                 self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png", np.concatenate(labels), np.concatenate(preds))
-                neptune_run[f"train/roc_curve_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png")
-                neptune_run[f"train/matrix_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png")
+                neptune_run[f"train/roc_curve_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_roc_curve.png")
+                neptune_run[f"train/matrix_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/train_matrix.png")
 
                 # Evaluate the model
-                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name="eval", neptune_run=neptune_run)
+                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"eval_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Compute the metrics
                 eval_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
@@ -260,12 +262,11 @@ class DirectionSplitTBL(Experiment):
                 self.to_pickle(f"./result/output/exp1/fold_{fold_num}/epoch_{epoch_num}/eval.pkl", {"labels": labels, "preds": preds, "probs": probs})
                 self.model.plot_roc_curve(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
                 self.model.plot_confusion_matrix(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png", np.concatenate(labels), np.concatenate(preds))
-                neptune_run[f"eval/roc_curve_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png")
-                neptune_run[f"eval/matrix_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png")
+                neptune_run[f"eval/roc_curve_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_roc_curve.png")
+                neptune_run[f"eval/matrix_fold_{fold_num}_epoch_{epoch_num}"].upload(f"./result/figure/exp1/fold_{fold_num}/epoch_{epoch_num}/eval_matrix.png")
 
                 # Check if this model is the best so far
-                if eval_metrics['roc_score'] > best_score:
-                    best_score = eval_metrics['roc_score']
+                if eval_metrics['roc_score'] > best_epoch["roc_score"]:
                     best_epoch["roc_score"] = eval_metrics['roc_score']
                     best_epoch["epoch"] = epoch
                     # Save the model
@@ -279,10 +280,9 @@ class DirectionSplitTBL(Experiment):
                     print(f"Early stopping at epoch {epoch_num}")
                     break
 
-            neptune_run.stop()
             self.results["selected_epochs"][f"fold_{fold_num}"] = best_epoch
 
-
+        neptune_run.stop()
         self.end_time = datetime.datetime.now()
         self.report("./result/report/exp1/")
         return self.results
