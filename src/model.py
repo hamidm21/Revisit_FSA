@@ -69,7 +69,7 @@ class CryptoBERT(Model):
         self.model.load_state_dict(model_state)
         return self.model
 
-    def train(self, dataloader, device, optimizer, learning_rate=2e-5, num_epochs=3, num_folds=5, neptune_run=None):
+    def train(self, dataloader, device, optimizer, learning_rate=2e-5, model_name="train", neptune_run=None):
         """
         Train the model on the given data and labels.
 
@@ -88,44 +88,32 @@ class CryptoBERT(Model):
         all_preds = []
         all_probs = []  # For storing probabilities
 
-        num_batches = len(dataloader)
-        total_training_steps = num_epochs * num_batches * num_folds
-        num_warmup_steps = int(0.1 * total_training_steps)
+        for batch in tqdm(dataloader, desc=f"Training Progress...", leave=False, dynamic_ncols=True):
+            optimizer.zero_grad()
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
 
-        # Initialize the learning rate scheduler
-        scheduler = self.get_linear_schedule_with_warmup(optimizer, num_warmup_steps, total_training_steps)
+            outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
 
-        for epoch in range(num_epochs):
-            for fold in range(num_folds):
-                for batch in tqdm(dataloader, desc=f"Training Progress... Epoch {epoch+1}/{num_epochs}, Fold {fold+1}/{num_folds}", leave=False, dynamic_ncols=True):
-                    optimizer.zero_grad()
-                    input_ids = batch['input_ids'].to(device)
-                    attention_mask = batch['attention_mask'].to(device)
-                    labels = batch['labels'].to(device)
+            # Store labels, predictions and probabilities for metrics calculation
+            preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            class_preds = torch.argmax(preds, dim=-1)
 
-                    outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss
-                    loss.backward()
-                    optimizer.step()
+            all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
+            all_preds.append(class_preds.cpu().detach().numpy())
+            all_labels.append(labels.cpu().detach().numpy())
 
-                    # Store labels, predictions and probabilities for metrics calculation
-                    preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                    class_preds = torch.argmax(preds, dim=-1)
-
-                    all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
-                    all_preds.append(class_preds.cpu().detach().numpy())
-                    all_labels.append(labels.cpu().detach().numpy())
-
-                    # Step the scheduler
-                    scheduler.step()
-
-                    if neptune_run:
-                        # Log metrics to Neptune
-                        neptune_metrics = ["accuracy", "precision", "f1", "recall"]
-                        # Compute metrics
-                        metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
-                        for metric_name in neptune_metrics:
-                            neptune_run[f"train/{metric_name}"].append(metrics.get(metric_name))
+            if neptune_run:
+                # Log metrics to Neptune
+                neptune_metrics = ["accuracy", "precision", "f1", "recall"]
+                # Compute metrics
+                metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
+                for metric_name in neptune_metrics:
+                    neptune_run[f"{model_name}/{metric_name}"].append(metrics.get(metric_name))
 
         return all_labels, all_preds, all_probs
 
@@ -189,7 +177,7 @@ class CryptoBERT(Model):
         dict: The computed classification metrics.
         """
         if metrics_to_return is None:
-            metrics_to_return = ["accuracy", "f1", "precision", "recall", "roc_auc", "confusion_matrix"]
+            metrics_to_return = ["accuracy", "f1", "precision", "recall", "roc_score", "confusion_matrix"]
 
         metrics = {}
 
@@ -205,8 +193,8 @@ class CryptoBERT(Model):
         if "accuracy" in metrics_to_return:
             metrics["accuracy"] = accuracy_score(labels, preds)
 
-        if "roc_auc" in metrics_to_return:
-            metrics["roc_auc"] = roc_auc_score(labels, probs, multi_class='ovr')
+        if "roc_score" in metrics_to_return:
+            metrics["roc_score"] = roc_auc_score(labels, probs, multi_class='ovr')
 
         if "confusion_matrix" in metrics_to_return:
             metrics["confusion_matrix"] = confusion_matrix(labels, preds)
