@@ -280,10 +280,9 @@ class DirectionSplitTBL(Experiment):
                     print(f"Early stopping at epoch {epoch_num}")
                     break
 
-            neptune_run.stop()
             self.results["selected_epochs"][f"fold_{fold_num}"] = best_epoch
 
-
+        neptune_run.stop()
         self.end_time = datetime.datetime.now()
         self.report("./result/report/exp1/")
         return self.results
