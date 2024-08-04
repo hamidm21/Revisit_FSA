@@ -269,7 +269,7 @@ class DirectionSplitTBL(Experiment):
                     best_epoch["roc_score"] = eval_metrics['roc_score']
                     best_epoch["epoch"] = epoch
                     # Save the model
-                    self.model.save_model(f"./artifacts/exp1/{index}/trained.pth")
+                    self.model.save_model(f"./artifact/exp1/{index}/trained.pth")
                     epochs_no_improve = 0  # Reset the counter
                 else:
                     epochs_no_improve += 1
@@ -443,10 +443,10 @@ class DirectionSplitSentiment(Experiment):
         tokenized_dataset = tweets_dataset.map(partial_tokenize_function, batched=True)
         
         # Load the base model
-        base_model = CryptoBERT(save_path=f'{base_addr}/artifacts/base_model_DSS_eval.pth')
+        base_model = CryptoBERT(save_path=f'{base_addr}/artifact/base_model_DSS_eval.pth')
         
-        load_path = base_addr + '/artifacts/fine_tuned_model.pth'
-        fine_tuned_model = CryptoBERT(load_state_dict=True, load_path=load_path, save_path=f'{base_addr}/artifacts/fine_tuned_model_DSS_eval.pth')
+        load_path = base_addr + '/artifact/fine_tuned_model.pth'
+        fine_tuned_model = CryptoBERT(load_state_dict=True, load_path=load_path, save_path=f'{base_addr}/artifact/fine_tuned_model_DSS_eval.pth')
         
         # Prepare the base model for evaluation
         base_model_trainer = base_model.get_trainer(tokenized_dataset)
@@ -597,7 +597,7 @@ class IntensitySplit(Experiment):
             self.results["base_model_intensity_split"][key] = value
             
         # Instantiate the CryptoBERT model for regression task
-        fine_tuned_model = CryptoBERT(input_task='regression', save_path=f'{self.base_addr}/artifacts/exp3_fine_tuned_model.pth')
+        fine_tuned_model = CryptoBERT(input_task='regression', save_path=f'{self.base_addr}/artifact/exp3_fine_tuned_model.pth')
         
         # Create DataLoader
         train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE)

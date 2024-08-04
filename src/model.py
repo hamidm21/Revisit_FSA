@@ -25,7 +25,7 @@ load_dotenv()
 base_address = os.getenv("BASE_ADDRESS")
 
 class CryptoBERT(Model):
-    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'./artifacts/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
+    def __init__(self, model_addr="ElKulako/cryptobert", save_path=f'./artifact/fine_tuned_model.pth', load_path=None, load_state_dict=False, input_task='classification'):
         super().__init__("huggingface ElKulako/cryptobert")
         self.model_addr = model_addr
         self.save_path = save_path
