@@ -1,5 +1,4 @@
 from itertools import cycle
-from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from sklearn.preprocessing import label_binarize
 from transformers import AutoModelForSequenceClassification, AutoConfig, Trainer, TrainingArguments
 from transformers.integrations import NeptuneCallback

@@ -72,8 +72,8 @@ class Experiment:
         """
         run = neptune.init_run(
         proxies={
-            "http": "http://hamid:423178@95.216.41.71:3128",
-            "https": "http://hamid:423178@95.216.41.71:3128"
+            "http": "http://hamid:Drako_21@95.216.41.71:3128",
+            "https": "http://hamid:Drako_21@95.216.41.71:3128"
         },
         project="Financial-NLP/market-aware-embedding",
         api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiI2YWViODAxNC05MzNkLTRiZGMtOGI4My04M2U3MDViN2U3ODEifQ==",

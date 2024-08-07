@@ -20,7 +20,6 @@ from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
 from datasets import Dataset, ClassLabel
-from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from collections import Counter
 
 # internal imports
@@ -157,7 +156,7 @@ class DirectionSplitTBL(Experiment):
         tweet_packs_to_df = lambda tweet_packs: pd.DataFrame([tweet for pack in tweet_packs for tweet in pack])
 
         windows = self.extract_windows(labeled_texts)
-        tweets = self.extract_tweets(windows, labeled_texts, 3)
+        tweets = self.extract_tweets(windows, labeled_texts, 100)
         flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
         shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
         shuffled_df = tweet_packs_to_df(shuffled_tweet_packs)
@@ -207,6 +206,12 @@ class DirectionSplitTBL(Experiment):
         neptune_run = self.init_neptune_run(f"exp_1", description="evaluating the base model without fintuning", params=params)
         for index in tqdm(range(params.get("FOLDS", 5)), desc="Folds Progress..."):
             fold_num = index + 1
+
+            self.model = CryptoBERT()
+
+            for param in self.model.model.roberta.encoder.layer[:11].parameters():
+                param.requires_grad = False
+
             train_dataset = TextDataset(train_folds[index])
             test_dataset = TextDataset(test_folds[index])
 
@@ -263,7 +268,7 @@ class DirectionSplitTBL(Experiment):
                 self.model.plot_roc_curve(f"./result/figure/exp1/{fold_epoch_addr}/eval_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
                 self.model.plot_confusion_matrix(f"./result/figure/exp1/{fold_epoch_addr}/eval_matrix.png", np.concatenate(labels), np.concatenate(preds))
                 neptune_run[f"eval/{fold_epoch_addr}/roc_curve"].upload(f"./result/figure/exp1/{fold_epoch_addr}/eval_roc_curve.png") if neptune_run else None
-                neptune_run[f"eval/{fold_epoch_addr}/matrix"].upload(f"./result/figure/exp1/{fold_epoch_addr}/train_matrix.png") if neptune_run else None
+                neptune_run[f"eval/{fold_epoch_addr}/matrix"].upload(f"./result/figure/exp1/{fold_epoch_addr}/eval_matrix.png") if neptune_run else None
 
                 # Check if this model is the best so far
                 if eval_metrics['roc_score'] > best_epoch["roc_score"]:
