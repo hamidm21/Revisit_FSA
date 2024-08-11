@@ -68,7 +68,7 @@ class CryptoBERT(Model):
         self.model.load_state_dict(model_state)
         return self.model
 
-    def train(self, dataloader, device, optimizer, learning_rate=2e-5, model_name="train", neptune_run=None):
+    def train(self, dataloader, device, optimizer, scheduler, learning_rate=2e-5, model_name="train", neptune_run=None):
         """
         Train the model on the given data and labels.
 
@@ -81,11 +81,12 @@ class CryptoBERT(Model):
         neptune_run (neptune.run.Run): The Neptune run instance.
 
         Returns:
-        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
+        Tuple[List, List, List, List]: The labels, predictions, probabilities, and losses for each batch.
         """
         all_labels = []
         all_preds = []
         all_probs = []
+        all_losses = []
 
         for batch in tqdm(dataloader, desc=f"Training Progress...", leave=False, dynamic_ncols=True):
             optimizer.zero_grad()
@@ -97,6 +98,7 @@ class CryptoBERT(Model):
             loss = outputs.loss
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
             # Store labels, predictions and probabilities for metrics calculation
             preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
@@ -105,6 +107,7 @@ class CryptoBERT(Model):
             all_probs.append(preds.detach().cpu().numpy())  # Store probabilities
             all_preds.append(class_preds.cpu().detach().numpy())
             all_labels.append(labels.cpu().detach().numpy())
+            all_losses.append(loss.item())
 
             if neptune_run:
                 # Log metrics to Neptune
@@ -113,8 +116,9 @@ class CryptoBERT(Model):
                 metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
                 for metric_name in neptune_metrics:
                     neptune_run[f"{model_name}/{metric_name}"].append(metrics.get(metric_name))
+                neptune_run[f"{model_name}/loss"].append(loss.item())
 
-        return all_labels, all_preds, all_probs
+        return all_labels, all_preds, all_probs, all_losses
 
 
     def evaluate(self, dataloader, device, model_name="base", neptune_run=None):
@@ -126,12 +130,13 @@ class CryptoBERT(Model):
         device (torch.device): The device to evaluate the model on.
 
         Returns:
-        Tuple[List, List, List]: The labels, predictions, and probabilities for each batch.
+        Tuple[List, List, List, list]: The labels, predictions, probabilities, losses for each batch.
         """
         # Evaluation loop
         all_labels = []
         all_preds = []
-        all_probs = []  # For storing probabilities
+        all_probs = []
+        all_losses = []
 
         for batch in tqdm(dataloader, desc="Evaluating Progress...", leave=False, dynamic_ncols=True):
             with torch.no_grad():
@@ -140,6 +145,7 @@ class CryptoBERT(Model):
                 labels = batch['labels'].to(device)
 
                 outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
 
                 # Get the predicted probabilities from the model's outputs
                 preds = torch.nn.functional.softmax(outputs.logits, dim=-1)
@@ -149,6 +155,7 @@ class CryptoBERT(Model):
                 all_probs.append(preds.cpu().numpy())  # Store probabilities
                 all_preds.append(class_preds.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
+                all_losses.append(loss.item())
 
             if neptune_run:
                 # Log metrics to Neptune
@@ -157,9 +164,9 @@ class CryptoBERT(Model):
                 metrics = self.compute_metrics_classification(np.concatenate(all_labels), np.concatenate(all_preds), np.concatenate(all_probs), neptune_metrics)
                 for metric_name in neptune_metrics:
                     neptune_run[f"{model_name}/{metric_name}"].append(metrics.get(metric_name))
+                neptune_run[f"{model_name}/loss"].append(loss.item())
 
-
-        return all_labels, all_preds, all_probs
+        return all_labels, all_preds, all_probs, all_losses
 
     @staticmethod
     def compute_metrics_classification(labels, preds, probs, metrics_to_return=None):
