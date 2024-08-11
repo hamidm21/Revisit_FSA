@@ -8,6 +8,7 @@ import pandas as pd
 from transformers import (
     AutoTokenizer,
     AutoModel,
+    get_linear_schedule_with_warmup
 )
 from tqdm import tqdm
 from sklearn.metrics import (
@@ -20,7 +21,6 @@ from scipy.special import softmax
 import torch
 from torch.utils.data import DataLoader
 from datasets import Dataset, ClassLabel
-from rich.progress import Progress, TextColumn, BarColumn, TimeRemainingColumn
 from collections import Counter
 
 # internal imports
@@ -129,10 +129,10 @@ class CrossValidatedTBL(Experiment, UndersampleTweetsMixin, ExtractWindowsMixin,
         params = {
             "samples": 0,
             "SEED": 42,
-            "TRAINING_BATCH_SIZE": 16,
-            "EPOCHS": 3,
+            "TRAINING_BATCH_SIZE": 5,
+            "EPOCHS": 2,
             "LEARNING_RATE": 1e-5,
-            "FOLDS": 5
+            "FOLDS": 3
         }
 
         self.start_time = datetime.datetime.now()
@@ -143,10 +143,10 @@ class CrossValidatedTBL(Experiment, UndersampleTweetsMixin, ExtractWindowsMixin,
         text_df = self.load_textual_data()
         price_df = self.load_price_data()
 
-        labeled_texts = self.label_and_merge()
+        labeled_texts = self.label_and_merge(price_df, text_df)
 
         windows = self.extract_windows(labeled_texts)
-        tweets = self.extract_tweets(windows, labeled_texts, 3)
+        tweets = self.extract_tweets(windows, labeled_texts, 50)
         flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
         shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
         shuffled_df = self.tweet_packs_to_df(shuffled_tweet_packs)
@@ -196,6 +196,12 @@ class CrossValidatedTBL(Experiment, UndersampleTweetsMixin, ExtractWindowsMixin,
         neptune_run = self.init_neptune_run(f"exp_1", description="evaluating the base model without fintuning", params=params)
         for index in tqdm(range(params.get("FOLDS", 5)), desc="Folds Progress..."):
             fold_num = index + 1
+
+            self.model = CryptoBERT()
+
+            for param in self.model.model.roberta.encoder.layer[:11].parameters():
+                param.requires_grad = False
+
             train_dataset = TextDataset(train_folds[index])
             test_dataset = TextDataset(test_folds[index])
 
@@ -204,14 +210,17 @@ class CrossValidatedTBL(Experiment, UndersampleTweetsMixin, ExtractWindowsMixin,
 
             # Move the model to the device
             self.model.model.to(device)
-            labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"base_fold_{fold_num}", neptune_run=neptune_run)
+            labels, preds, probs, losses = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"base_fold_{fold_num}", neptune_run=neptune_run)
             base_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
-            self.results[f"{model_name}"][f"fold_{fold_num}"] = base_metrics
-            self.store_results('base', f'fold_{fold_num}', labels, preds, probs, neptune_run=neptune_run)
+            self.results[f"base"][f"fold_{fold_num}"] = base_metrics
+            self.store_results('exp1', 'base', f'fold_{fold_num}', labels, preds, probs, losses, neptune_run)
 
             # Set up the optimizer
             optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
-
+            num_epochs = params["EPOCHS"]
+            num_training_steps = num_epochs * len(train_dataloader)
+            num_warmup_steps = int(0.1 * num_training_steps)  # 10% of training steps
+            scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
             # Initialize early stopping parameters
             best_epoch = {
                     "roc_score": float('-inf'),
@@ -224,19 +233,19 @@ class CrossValidatedTBL(Experiment, UndersampleTweetsMixin, ExtractWindowsMixin,
                 epoch_num = epoch + 1
                 fold_epoch_addr = f"fold_{fold_num}/epoch_{epoch_num}"
                 # Train the model for one epoch and get the labels, predictions, and probabilities
-                labels, preds, probs = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, learning_rate=params["LEARNING_RATE"], model_name=f"train_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
+                labels, preds, probs, losses = self.model.train(dataloader=train_dataloader, device=device, optimizer=optimizer, scheduler=scheduler, learning_rate=params["LEARNING_RATE"], model_name=f"train_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Calculate the metrics for this epoch
                 train_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = train_metrics
-                self.store_results('train', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
+                self.store_results('exp1', 'train', fold_epoch_addr, labels, preds, probs, losses, neptune_run=neptune_run)
                 # Evaluate the model
-                labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"eval_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
+                labels, preds, probs, losses = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"eval_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Compute the metrics
                 eval_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["eval"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = eval_metrics
-                self.store_results('eval', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
+                self.store_results('exp1', 'eval', fold_epoch_addr, labels, preds, probs, losses, neptune_run=neptune_run)
                 # Check if this model is the best so far
                 if eval_metrics['roc_score'] > best_epoch["roc_score"]:
                     best_epoch["roc_score"] = eval_metrics['roc_score']
@@ -335,21 +344,26 @@ class CrossValidatedConfirmed(Experiment, UndersampleTweetsMixin, ExtractWindows
         # loading and labeling the data
         self.logger.info(f"loading and labeling the data...")
         # Loading the price data
+        # Transform col to index
+        to_index = lambda col, df: df.set_index(col)
+        # Rename text_plit to text
+        rename = lambda original, new, df: df.rename(columns={original: new})
+
         columns = ["timestamp", "close", "open", "high", "low", "volume"]
-        price_df = pandas_data_loader("../raw/daily-2020.csv", columns, partial(to_index, "timestamp"), index_to_datetime)
+        price_df = self.pandas_data_loader(self.price_df_addr, columns, partial(to_index, "timestamp"), self.index_to_datetime)
         
         # Loading sentiment labeled tweets
         columns = ["text", "date", "sentiment_label"]
-        text_df = pandas_data_loader("../raw/labeled_tweets.csv", columns, partial(to_index, "date"), partial(index_to_datetime, unit='ns'), partial(rename, "text_split", "text"))
+        text_df = self.pandas_data_loader(self.text_df_addr, columns, partial(to_index, "date"), partial(self.index_to_datetime, unit='ns'), partial(rename, "text_split", "text"))
         text_df = text_df.loc['2020-01-01':'2020-12-31']
 
-        labeled_texts = self.label_and_merge()
+        labeled_texts = self.label_and_merge(price_df, text_df)
 
         # strictly filtered dataset. only sentiment/market confirmed tweets remain
         labeled_texts = labeled_texts.loc[(labeled_texts['sentiment_label'] == 2) & (labeled_texts['next_day_label'] == 2) | (labeled_texts['next_day_label'] != 2) & (labeled_texts['sentiment_label'] != 2)]
 
         windows = self.extract_windows(labeled_texts)
-        tweets = self.extract_tweets(windows, labeled_texts, 3)
+        tweets = self.extract_tweets(windows, labeled_texts, None)
         flattened_tweet_packs = [tweet_pack for window in tweets for tweet_pack in window]
         shuffled_tweet_packs = self.shuffle_tweet_packs(flattened_tweet_packs, seed=True)
         shuffled_df = self.tweet_packs_to_df(shuffled_tweet_packs)
@@ -396,9 +410,11 @@ class CrossValidatedConfirmed(Experiment, UndersampleTweetsMixin, ExtractWindows
         }
 
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') 
-        neptune_run = self.init_neptune_run(f"exp_1", description="evaluating the base model without fintuning", params=params)
+        neptune_run = self.init_neptune_run(f"exp_2", description="evaluating the base model without fintuning", params=params)
         for index in tqdm(range(params.get("FOLDS", 5)), desc="Folds Progress..."):
             fold_num = index + 1
+
+            self.model = CryptoBERT()
             train_dataset = TextDataset(train_folds[index])
             test_dataset = TextDataset(test_folds[index])
 
@@ -409,8 +425,8 @@ class CrossValidatedConfirmed(Experiment, UndersampleTweetsMixin, ExtractWindows
             self.model.model.to(device)
             labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"base_fold_{fold_num}", neptune_run=neptune_run)
             base_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
-            self.results[f"{model_name}"][f"fold_{fold_num}"] = base_metrics
-            self.store_results('base', f'fold_{fold_num}', labels, preds, probs, neptune_run=neptune_run)
+            self.results['base'][f"fold_{fold_num}"] = base_metrics
+            self.store_results('exp2', 'base', f'fold_{fold_num}', labels, preds, probs, neptune_run=neptune_run)
 
             # Set up the optimizer
             optimizer = torch.optim.AdamW(self.model.model.parameters(), lr=params["LEARNING_RATE"])
@@ -432,20 +448,20 @@ class CrossValidatedConfirmed(Experiment, UndersampleTweetsMixin, ExtractWindows
                 # Calculate the metrics for this epoch
                 train_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["train"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = train_metrics
-                self.store_results('train', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
+                self.store_results('exp2', 'train', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
                 # Evaluate the model
                 labels, preds, probs = self.model.evaluate(dataloader=test_dataloader, device=device, model_name=f"eval_fold_{fold_num}_epoch_{epoch_num}", neptune_run=neptune_run)
 
                 # Compute the metrics
                 eval_metrics = self.model.compute_metrics_classification(np.concatenate(labels), np.concatenate(preds), np.concatenate(probs))
                 self.results["eval"][f"fold_{fold_num}"][f"epoch_{epoch_num}"] = eval_metrics
-                self.store_results('eval', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
+                self.store_results('exp2', 'eval', fold_epoch_addr, labels, preds, probs, neptune_run=neptune_run)
                 # Check if this model is the best so far
                 if eval_metrics['roc_score'] > best_epoch["roc_score"]:
                     best_epoch["roc_score"] = eval_metrics['roc_score']
                     best_epoch["epoch"] = epoch
                     # Save the model
-                    self.model.save_model(f"./artifact/exp1/{index}/trained.pth")
+                    self.model.save_model(f"./artifact/exp2/{index}/trained.pth")
                     epochs_no_improve = 0  # Reset the counter
                 else:
                     epochs_no_improve += 1
@@ -459,29 +475,8 @@ class CrossValidatedConfirmed(Experiment, UndersampleTweetsMixin, ExtractWindows
 
         neptune_run.stop()
         self.end_time = datetime.datetime.now()
-        self.report("./result/report/exp1/")
+        self.report("./result/report/exp2/")
         return self.results
-
-    def load_textual_data(self) -> pd.DataFrame:
-        """
-        returns text_df and price_df in raw format
-        """
-        text_df = pd.read_csv(self.text_df_addr, usecols=["date", "text_split", "sentiment_label"])
-        text_df.rename(columns={"text_split": "text"}, inplace=True)
-        text_df.set_index("date", inplace=True)
-        text_df.index = pd.to_datetime(text_df.index)
-
-        return text_df
-
-    def load_price_data(self) -> pd.DataFrame:
-        price_df = pd.read_csv(
-            self.price_df_addr,
-            usecols=["timestamp", "close", "open", "high", "low", "volume"],
-        )
-        price_df.set_index("timestamp", inplace=True)
-        price_df.index = pd.to_datetime(price_df.index, unit='s')
-
-        return price_df
 
     def label_and_merge(self, price_df, text_df) -> pd.DataFrame:
         self.labeler.fit(price_df)

@@ -1,4 +1,6 @@
 import pandas as pd
+import numpy as np
+from typing import List, Callable
 import random
 from tqdm import tqdm
 
@@ -64,22 +66,14 @@ class ShuffleTweetPacksMixin:
         return shuffled_packs
 
 class StoreResultsMixin:
-    @staticmethod
-    def store_results(model_name, fold_epoch_addr, labels, preds, probs, neptune_run):
-        self.to_pickle(f"./result/report/exp1/{fold_epoch_addr}/{model_name}.pkl", self.results["{model_name}"][f"fold_{fold_epoch_addr}"])
-        self.to_pickle(f"./result/output/exp1/{fold_epoch_addr}/{model_name}.pkl", {"labels": labels, "preds": preds, "probs": probs})
-        self.model.plot_roc_curve(f"./result/figure/exp1/{fold_epoch_addr}/{model_name}_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
-        self.model.plot_confusion_matrix(f"./result/figure/exp1/{fold_epoch_addr}/{model_name}_matrix.png", np.concatenate(labels), np.concatenate(preds))
-        neptune_run[f"{model_name}/{fold_epoch_addr}/roc_curve"].upload(f"./result/figure/exp1/{fold_epoch_addr}/{model_name}_roc_curve.png") if neptune_run else None
-        neptune_run[f"{model_name}/{fold_epoch_addr}/matrix"].upload(f"./result/figure/exp1/{fold_epoch_addr}/{model_name}_matrix.png") if neptune_run else None
+    def store_results(self, exp_name, model_name, fold_epoch_addr, labels, preds, probs, losses, neptune_run): 
+        self.to_pickle(f"./result/output/{exp_name}/{fold_epoch_addr}/{model_name}.pkl", {"labels": labels, "preds": preds, "probs": probs, "losses": losses})
+        self.model.plot_roc_curve(f"./result/figure/{exp_name}/{fold_epoch_addr}/{model_name}_roc_curve.png", np.concatenate(labels), np.concatenate(probs))
+        self.model.plot_confusion_matrix(f"./result/figure/{exp_name}/{fold_epoch_addr}/{model_name}_matrix.png", np.concatenate(labels), np.concatenate(preds))
+        neptune_run[f"{model_name}/{fold_epoch_addr}/roc_curve"].upload(f"./result/figure/{exp_name}/{fold_epoch_addr}/{model_name}_roc_curve.png") if neptune_run else None
+        neptune_run[f"{model_name}/{fold_epoch_addr}/matrix"].upload(f"./result/figure/{exp_name}/{fold_epoch_addr}/{model_name}_matrix.png") if neptune_run else None
 
 class DataFrameReaderMixin:
-    def __init__():
-        # Transform col to index
-        self.to_index = lambda col, df: df.set_index(col)
-        # Rename text_plit to text
-        self.rename = lambda original, new, df: df.rename(columns={original: new})
-
     @staticmethod
     def pandas_data_loader(addr: str, columns: List[str], *transforms: Callable[[pd.DataFrame], pd.DataFrame]) -> pd.DataFrame:
         # Load the data from the CSV file
