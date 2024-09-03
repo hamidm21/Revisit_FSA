@@ -14,3 +14,4 @@ tokenizers==0.15.2
 torch==2.2.0
 tqdm==4.66.1
 transformers==4.39.3
+backtrader==1.9.78.123
