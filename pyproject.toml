@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "financial nlp experiments"
 authors = ["Hamid Moradi <hordimad21@gmail.com>"]
 readme = "README.md"
-package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
@@ -22,10 +21,6 @@ seaborn = "0.13.0"
 scipy = "1.11.3"
 emoji = "^2.11.1"
 python-dotenv = "^1.0.1"
-
-[tool.poetry.group.dev.dependencies]
-ipykernel = "^6.29.4"
-jupyter = "^1.0.0"
 
 [build-system]
 requires = ["poetry-core"]

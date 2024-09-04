@@ -22,9 +22,6 @@ def runner(args):
         logger.info(f"experiment {id} found...")
         exp = EXPERIMENTS.get(id)(logger=logger)
         exp.run()
-        logger.info("generating report...")
-        report = exp.report()
-        print(report)
     else:
         raise ValueError("no experiment with the given id exist")
 

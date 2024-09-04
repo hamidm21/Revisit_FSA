@@ -1,4 +1,6 @@
 from logging import Logger
+import pickle
+import os
 import neptune
 import pandas as pd
 
@@ -32,7 +34,7 @@ class Experiment:
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
-    def report(self):
+    def report(self, base_addr):
         """
         Report the results of the experiment.
 
@@ -49,7 +51,19 @@ class Experiment:
             "duration": duration,
             "results": self.results,
         }
+        # Save the report to a file at the given address
+        self.to_pickle(f"{base_addr}/experiment_{self.id}_full_report.pkl", report)
+
         return report
+
+    @staticmethod
+    def to_pickle(addr, obj):
+        dir_name = os.path.dirname(addr)
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+        # Save the report to a file at the given address
+        with open(addr, "wb") as f:
+            pickle.dump(obj, f)
 
     @staticmethod
     def init_neptune_run(name, description, params):
@@ -58,8 +72,8 @@ class Experiment:
         """
         run = neptune.init_run(
         proxies={
-            "http": "http://tracker:nlOv5rC7cL3q3bYR@95.216.41.71:3128",
-            "https": "http://tracker:nlOv5rC7cL3q3bYR@95.216.41.71:3128"
+            "http": "http://hamid:Drako_21@95.216.41.71:3128",
+            "https": "http://hamid:Drako_21@95.216.41.71:3128"
         },
         project="Financial-NLP/market-aware-embedding",
         api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiI2YWViODAxNC05MzNkLTRiZGMtOGI4My04M2U3MDViN2U3ODEifQ==",

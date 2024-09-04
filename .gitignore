@@ -171,8 +171,9 @@ dataset/*
 mlruns
 
 # Saved model checkpoints
-artifacts/*
+artifact/*
 
 .neptune
 
 *.pth
+result/*

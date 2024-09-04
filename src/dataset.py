@@ -22,6 +22,7 @@ class HFDataset(HuggingfaceDataset):
                 hashtags_list += HFDataset.extract_hashtags(text) 
                 text = HFDataset.remove_user_ids(text)
                 text = HFDataset.remove_punctuations(text)
+                # text = HFDataset.preprocess_with_lemmatization(text)
                 text_list[enum] = HFDataset.replace_with_BTC(text)
                 if (not is_ads_tweet):
                     is_ads_tweet = HFDataset.is_ads(text, ads_keywords)
@@ -53,6 +54,22 @@ class HFDataset(HuggingfaceDataset):
         tokenized_datasets = dataset.map(partial_tokenize_function, batched=True)
 
         return tokenized_datasets
+
+    @staticmethod
+    def preprocess_with_lemmatization(text):
+        lemmatizer = WordNetLemmatizer()
+        # Existing preprocessing steps...
+        text_list = [lemmatizer.lemmatize(word) for word in text_list]
+        # ...remaining code
+        return processed_text
+
+    @staticmethod
+    def preprocess_with_stemming(text):
+        stemmer = PorterStemmer()
+        # Existing preprocessing steps...
+        text_list = [stemmer.stem(word) for word in text_list]
+        # ...remaining code
+        return processed_text
 
     @staticmethod
     def remove_URL(text):
