@@ -10,11 +10,24 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 from typing import Optional
 from tqdm.auto import tqdm
-import numpy as np
 import matplotlib.pyplot as plt
 from type import Model
 import os
 from dotenv import load_dotenv
+
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.regularizers import l2
+from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils import resample
+from ta.momentum import RSIIndicator
 
 
 # Load environment variables from .env file
@@ -314,3 +327,173 @@ class CryptoBERT(Model):
         # Save the figure to the output directory with a unique name
         plt.savefig(path)
         plt.close()
+
+
+class LSTMModel(Model):
+    def __init__(self, name, average_duration, test_size=0.2, batch_size=64, epochs=200, learning_rate=0.001):
+        super().__init__(name)
+        self.average_duration = average_duration
+        self.test_size = test_size
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.model = None
+        self.scaler = StandardScaler()
+
+    def preprocess_data(self, prices):
+        """
+        Preprocess the data: calculate ROC, RSI, Momentum, normalize features, and split into train/test sets.
+
+        Args:
+        prices (DataFrame): The dataframe containing price and label information.
+
+        Returns:
+        tuple: Training and test datasets along with their labels.
+        """
+        # Calculate ROC, RSI, and Momentum
+        prices['ROC'] = prices['close'].pct_change()
+        rsi_indicator = RSIIndicator(close=prices['close'], window=self.average_duration)
+        prices['RSI'] = rsi_indicator.rsi()
+        prices['Momentum'] = prices['close'].diff(periods=self.average_duration)
+
+        # Shift labels to create y_true and drop NaN rows
+        prices['y_true'] = prices['labels'].shift(-1).dropna()
+        prices = prices.dropna()
+
+        # Define features and labels
+        features = ['ROC', 'RSI', 'Momentum', 'rise_over_trend', 'previous_window_trend']
+        labels = prices['y_true'].astype(int)
+
+        # Normalize features
+        prices[features] = self.scaler.fit_transform(prices[features])
+
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(prices[features].values, labels.values, test_size=self.test_size, shuffle=False)
+
+        # Reshape for LSTM
+        X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+        X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+
+        return X_train, X_test, y_train, y_test
+
+    def balance_data(self, X_train, y_train):
+        """
+        Balance the training data using oversampling.
+
+        Args:
+        X_train (array): The training feature data.
+        y_train (array): The training labels.
+
+        Returns:
+        tuple: Balanced training data and labels.
+        """
+        # Combine features and labels into a single DataFrame for balancing
+        train_data = np.hstack((X_train.reshape(X_train.shape[0], X_train.shape[2]), y_train.reshape(-1, 1)))
+        train_df = pd.DataFrame(train_data, columns=['ROC', 'RSI', 'Momentum', 'rise_over_trend', 'previous_window_trend', 'y_true'])
+
+        # Separate classes and oversample
+        class_0 = train_df[train_df['y_true'] == 0]
+        class_1 = train_df[train_df['y_true'] == 1]
+        class_2 = train_df[train_df['y_true'] == 2]
+
+        class_1_over = resample(class_1, replace=True, n_samples=len(class_0), random_state=42)
+        class_2_over = resample(class_2, replace=True, n_samples=len(class_0), random_state=42)
+
+        # Combine the oversampled classes
+        balanced_train_df = pd.concat([class_0, class_1_over, class_2_over])
+
+        # Sort by index to maintain order and separate features and labels
+        balanced_train_df.sort_index(inplace=True)
+        X_train_balanced = balanced_train_df.iloc[:, :-1].values.reshape(-1, 1, len(balanced_train_df.columns) - 1)
+        y_train_balanced = to_categorical(balanced_train_df['y_true'].values, num_classes=3)
+
+        return X_train_balanced, y_train_balanced
+
+    def build_model(self, input_shape):
+        """
+        Build and compile the LSTM model.
+
+        Args:
+        input_shape (tuple): The shape of the input data.
+        """
+        self.model = Sequential([
+            LSTM(64, input_shape=input_shape, return_sequences=True),
+            Dropout(0.3),
+            LSTM(32, return_sequences=False),
+            Dropout(0.3),
+            Dense(32, activation='relu', kernel_regularizer=l2(0.001)),
+            Dense(3, activation='softmax')
+        ])
+        self.model.compile(loss='categorical_crossentropy',
+                           optimizer=Adam(learning_rate=self.learning_rate),
+                           metrics=['accuracy'])
+
+    def train(self, X_train, y_train, X_val, y_val):
+        """
+        Train the LSTM model with early stopping.
+
+        Args:
+        X_train (array): The training feature data.
+        y_train (array): The training labels.
+        X_val (array): The validation feature data.
+        y_val (array): The validation labels.
+        """
+        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+        self.history = self.model.fit(X_train, y_train, epochs=self.epochs, batch_size=self.batch_size, 
+                                      validation_data=(X_val, y_val), callbacks=[early_stopping], verbose=1)
+
+    def predict(self, X_test):
+        """
+        Predict using the trained model.
+
+        Args:
+        X_test (array): The test feature data.
+
+        Returns:
+        array: The predicted labels.
+        """
+        y_pred = self.model.predict(X_test)
+        return np.argmax(y_pred, axis=1)
+
+    def evaluate(self, X_test, y_test):
+        """
+        Evaluate the model performance on the test data.
+
+        Args:
+        X_test (array): The test feature data.
+        y_test (array): The true labels for the test data.
+
+        Returns:
+        float: The accuracy of the model.
+        """
+        loss, accuracy = self.model.evaluate(X_test, y_test, verbose=0)
+        print(f'Test Accuracy: {accuracy:.4f}')
+        return accuracy
+
+    def compute_metrics(self, y_pred, y_true):
+        """
+        Compute accuracy, precision, recall, and F1 score.
+
+        Args:
+        y_pred (array): The predicted labels.
+        y_true (array): The true labels.
+
+        Returns:
+        dict: The computed metrics.
+        """
+        accuracy = accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, average='weighted')
+        recall = recall_score(y_true, y_pred, average='weighted')
+        precision = precision_score(y_true, y_pred, average='weighted')
+
+        print(f"Accuracy: {accuracy}")
+        print(f"F1 Score: {f1}")
+        print(f"Recall: {recall}")
+        print(f"Precision: {precision}")
+
+        return {
+            'accuracy': accuracy,
+            'f1_score': f1,
+            'recall': recall,
+            'precision': precision
+        }
