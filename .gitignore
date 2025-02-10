@@ -177,3 +177,6 @@ artifact/*
 
 *.pth
 result/*
+
+
+*.png
