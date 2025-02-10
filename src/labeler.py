@@ -50,7 +50,7 @@ class TripleBarrierLabeler(Labeler):
         df.loc[origin:i+1, 'label'] = label
         return df
 
-    def get_daily_vol(self, close, span0=100):
+    def get_daily_vol(self, close, span0=30):
         """
         Calculate the daily volatility of closing prices.
         
@@ -61,20 +61,9 @@ class TripleBarrierLabeler(Labeler):
         Returns:
         - A pandas Series of daily volatility estimates.
         """
-        # Find the start of the previous day for each day
-        prev_day_start = close.index.searchsorted(close.index - pd.Timedelta(days=1))
-        prev_day_start = prev_day_start[prev_day_start > 0]
-        
-        # Create a series with the start of the previous day for each day
-        prev_day_start = pd.Series(close.index[prev_day_start - 1], index=close.index[close.shape[0] - prev_day_start.shape[0]:])
-        
-        # Calculate daily returns
-        daily_returns = close.loc[prev_day_start.index] / close.loc[prev_day_start.values].values - 1
-        
-        # Calculate EWM standard deviation of daily returns
-        daily_vol = daily_returns.ewm(span=span0).std()
-        
-        return daily_returns, daily_vol
+        daily_returns = np.log(price_df.close / price_df.close.shift(1))
+        ewma_volatility = daily_returns.ewm(span=span).std()
+        return daily_returns, ewma_volatility
 
     def fit(self, sdf):
         df = sdf.copy()
