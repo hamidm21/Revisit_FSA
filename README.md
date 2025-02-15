@@ -1,4 +1,4 @@
-# Financial NLP Notebooks
+# Revisiting Financial Sentiment Analysis: A Language Model Approach
 
 
 ## How to run
