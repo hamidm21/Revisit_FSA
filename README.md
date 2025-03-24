@@ -29,5 +29,4 @@ Here are the folders and what they contain:
 
 ## Summary of the Backtesting results
 ![Backtest Table](https://github.com/user-attachments/assets/78613498-679e-481c-b21c-ff43bcad4e88)
-![image](https://github.com/user-attachments/assets/4688e8fd-597d-4bbe-9a98-8ee70c29b665)
 
