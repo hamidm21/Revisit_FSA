@@ -4,7 +4,7 @@
 corresponding code to the paper: https://arxiv.org/abs/2502.14897
 
 ## Easy access
-- Neptune AI results for language model experiments can be found [here](https://app.neptune.ai/o/Financial-NLP/org/market-aware-embedding/) including tables, confusion matrixes and more.
+- Neptune AI results for language model experiments can be found [here]([https://app.neptune.ai/o/Financial-NLP/org/market-aware-embedding/](https://app.neptune.ai/o/Financial-NLP/org/market-aware-embedding/runs/table?viewId=standard-view&lbViewUnpacked=true&sortBy=%5B%22sys%2Fcreation_time%22%5D&sortFieldType=%5B%22datetime%22%5D&sortFieldAggregationMode=%5B%22auto%22%5D&sortDirection=%5B%22descending%22%5D&groupBy=%5B%22sys%2Fgroup_tags%22%5D&groupByFieldType=%5B%22stringSet%22%5D&groupByFieldAggregationMode=%5B%22auto%22%5D)) including tables, confusion matrixes and more.
 - the main notebook on Kaggle called tweet-classification can be found [here](https://github.com/hamidm21/Revisit_FSA/blob/master/notebook/tweet-classification.ipynb)
 - the final implementation and optimization of Triple Barrier Labeling can be found in the notebook [next_day_prediction](https://github.com/hamidm21/Revisit_FSA/blob/master/notebook/next_day_prediction.ipynb)
 
